@@ -1,0 +1,105 @@
+// This macro is designed to quantify the necrotic area in an HE stained tissue section
+// This version was used in the publication "Applying Tissue Slice Culture in Cancer Research – Insights from
+// Preclinical Proton Radiotherapy" (Suckert et al., 2020)
+
+//Copyright 2020, Johannes Müller, OncoRay/HZDR Dresden
+ 
+// Redistribution and use in source and binary forms, with or without modification, 
+// are permitted provided that the following conditions are met:
+// 
+// 1. Redistributions of source code must retain the above copyright notice, this 
+//    list of conditions and the following disclaimer.
+// 
+// 2. Redistributions in binary form must reproduce the above copyright notice, 
+//    this list of conditions and the following disclaimer in the documentation 
+//    and/or other materials provided with the distribution.
+// 
+// 3. Neither the name of the copyright holder nor the names of its contributors 
+//    may be used to endorse or promote products derived from this software without 
+//    specific prior written permission.
+// 
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
+// WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. 
+// IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, 
+// INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT 
+// NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR 
+// PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+// WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) 
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+// POSSIBILITY OF SUCH DAMAGE.
+//
+//####################################################################################
+ 
+// Configuration
+
+run("Close All");
+run("Set Measurements...", "area area_fraction redirect=None decimal=2");
+Composite = "Composite";
+var savename = 0;
+
+/////////////
+	
+Opening();
+waitForUser("Correct background.", "Click OK when done");
+Necrosis_Segmentation("Composite", 3);
+Saving();
+
+///////////
+
+
+function Opening(){
+	file = File.openDialog('select file');
+	open(file);
+	path= getDirectory("image");
+	rename(Composite);
+	name = File.nameWithoutExtension();
+	savename = path + name;
+	run("RGB Color");
+	rename("Composite")
+	selectWindow("Composite");
+	run("Close");
+	return savename;
+}
+
+function Necrosis_Segmentation(Image, k_size_necro){
+                //Image: name of raw HE image to be segmented
+                // k_size_necro: Kernel size for gaussian blurring prior to colour deconvolution.
+                // Depending on your staining and image aquisition, you may have to adjust the thresholding method
+                // Array to store threshold values
+                
+                
+                selectWindow(Image);
+                run("Gaussian Blur...", "sigma=" + k_size_necro);
+                
+                // Deconcolute and close unnecessary images
+                run("Colour Deconvolution", "vectors=[H&E 2] hide create");
+                close(Image + "-(Colour_3)");
+                selectWindow(Image  + "-(Colour_2)");
+                rename("Whole tumor");
+  				setAutoThreshold("Otsu no-reset");
+  				run("Make Binary");
+  				run("Analyze Particles...", "summarize")
+
+				selectWindow(Image  + "-(Colour_1)");
+				rename("Viable area");
+				setAutoThreshold("Otsu no-reset");
+  				run("Make Binary");
+  				run("Analyze Particles...", "summarize")                
+}
+
+function Saving(){
+	//Finally, save the images in a stack for later verification. RGB is needed otherwise all pics will get the same LUT
+	//Save the summary in a .csv file
+	//Remember to choose the right seperators in your Excel settings when further processing the data
+	run("Images to Stack", "title=[] use");
+	savenameImage = savename + "_segmentation";
+	saveAs(".Tiff", savenameImage);
+
+	savenameSummary = savename + "_results.csv";
+	selectWindow("Summary");
+	saveAs("Results", savenameSummary);
+	run("Close");
+	
+	run("Close All");
+};
