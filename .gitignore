@@ -2,4 +2,5 @@
 *.tif
 
 # Data in general
-Data/
+data/
+src/
