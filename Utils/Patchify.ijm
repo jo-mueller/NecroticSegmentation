@@ -60,6 +60,8 @@ function Patchify(image, labels, size, outdir){
 
 	Nx = floor(width/size);
 	Ny = floor(height/size);
+
+	// First iteration
 	for (ix = 0; ix < Nx; ix++) {
 		for (iy = 0; iy < Ny; iy++) {
 
@@ -84,6 +86,35 @@ function Patchify(image, labels, size, outdir){
 			Tile2File(image, image + "_ix" + ix + "_iy" + iy + "_image", outdir + "Tiles/");
 		}
 	}
+	// Second iteration
+	for (ix = 0; ix < Nx; ix++) {
+		for (iy = 0; iy < Ny; iy++) {
+
+			// for every tile, check amount of background. 
+			// If too much, skip.
+			selectWindow(labels);
+			setThreshold(0, 0);
+			run("Measure");	
+
+			// Only full tiles
+			if (ix*size + 3*size/2 > getWidth() || iy*size + 3*size/2 > getHeight()) {
+				continue;
+			}
+			// Patchify Labels
+			makeRectangle(ix*size + floor(size/2), iy*size + floor(size/2), size, size);
+			if (getResult("%Area", nResults-1) > 50) {
+				continue;
+			}	
+
+			selectWindow(labels);
+			Tile2File(labels, image + "_2ix" + ix + "_2iy" + iy + "_labels", outdir + "Tiles/");
+			
+			// Patchify image
+			selectWindow(image);	
+			makeRectangle(ix*size, iy*size, size, size);
+			Tile2File(image, image + "_2ix" + ix + "_2iy" + iy + "_image", outdir + "Tiles/");
+		}
+	}
 }
 
 function Tile2File(image, tilename, dir){
@@ -101,7 +132,7 @@ function OverlayCorrect(image, overlay){
 	selectWindow(image);
 	run("RGB Color");
 
-	run("Add Image...", "image=["+RGB+"] x=0 y=0 opacity=50");
+	run("Add Image...", "image=["+RGB+"] x=0 y=0 opacity=80");
 	waitForUser("Contouring");
 	run("Remove Overlay");
 	close(RGB);	
