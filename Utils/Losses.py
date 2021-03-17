@@ -61,14 +61,17 @@ def jaccard(outputs, targets, per_image=False, non_empty=False, min_pixels=5):
 
 
 class DiceLoss(nn.Module):
-    def __init__(self, weight=None, size_average=True, per_image=False):
+    def __init__(self, weight=None, size_average=True, per_image=False, per_channel=True):
+        
         super().__init__()
         self.size_average = size_average
         self.register_buffer('weight', weight)
         self.per_image = per_image
+        self.per_channel = per_channel
 
     def forward(self, input, target):
-        return soft_dice_loss(input, target, per_image=self.per_image)
+        return soft_dice_loss(input, target, per_image=self.per_image,
+                              per_channel=self.per_channel)
 
 
 class JaccardLoss(nn.Module):
