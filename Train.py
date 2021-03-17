@@ -11,19 +11,21 @@ import numpy as np
 import pandas as pd
 import tifffile as tf
 import cv2
+import tifffile as tf
+import matplotlib.pyplot as plt
 
 import albumentations as albu
 from albumentations.pytorch.transforms import ToTensor
 
 from sklearn.model_selection import KFold
 
-from Utils import Unet
 import segmentation_models_pytorch as smp
 from Utils import helper_functions
 
 from torch.utils.data import DataLoader
-from Utils.Losses import ComboLoss, MixedLoss, LovaszLossSigmoid
+# from Utils.Losses import ComboLoss, MixedLoss, LovaszLossSigmoid
 import torch
+from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss
 
 class Dataset():
     def __init__(self, rle_df, image_base_dir, augmentation=None):
@@ -34,14 +36,16 @@ class Dataset():
     
     def __getitem__(self, i):
         image_id  = self.image_ids[i]
-        img_path  = os.path.join(self.image_base_dir, image_id)
-        mask_path = img_path.replace('image', 'labels')
+        
+        mask_path = os.path.join(self.image_base_dir, image_id)
+        img_path = mask_path.replace('-labelled', '')
         image     = cv2.imread(img_path, 1)
-        mask      = cv2.imread(mask_path, 1)     
+        mask      = np.argmax(tf.imread(mask_path), axis=0)
+        
         # apply augmentations
         if self.augmentation:
             sample = {"image": image, "mask": mask}
-            sample = self.augmentation(**sample)
+            sample = self.augmentation(image=image, mask=mask)
             image, mask = sample['image'], sample['mask']
 
         return {'image': image, 'mask' : mask}
@@ -62,10 +66,12 @@ def train_one_epoch(train_loader, model, optimizer, loss_fn, accumulation_steps=
     for b_idx, data in enumerate(tk0):
         for key, value in data.items():
             data[key] = value.to(device)
+            
         if accumulation_steps == 1 and b_idx == 0:
             optimizer.zero_grad()
+
         out  = model(data['image'])
-        loss = loss_fn(out, data['mask'])
+        loss = loss_fn(out, torch.argmax(data['mask'], dim=1))
         
         # backpropagation
         with torch.set_grad_enabled(True):
@@ -82,24 +88,24 @@ def train_one_epoch(train_loader, model, optimizer, loss_fn, accumulation_steps=
 
 
 root = os.getcwd()
-src = root + '/src/Tiles'
+src = root + r'\src\QuPath_Tiling\tiles\N182a_SAS_1_1_170905-Scene-1-ScanRegion0_HE'
 
 # Config
 FOLD_ID = 4
-TRAIN_BATCH_SIZE = 2
+TRAIN_BATCH_SIZE = 6
 VALID_BATCH_SIZE = 2
 USE_SAMPLER = False
 SAMPLER  = None
 num_workers = 0
-PRETRAINED = False
-PRETRAINED_PATH = None
 LEARNING_RATE = 2e-5
-USE_CRIT = True
-CRITERION =LovaszLossSigmoid()
+criterion = BCEWithLogitsLoss()
 TRAIN_MODEL = True
-EPOCHS = 50
+EPOCHS = 300
 IMG_SIZE = 512
 EVALUATE = True
+N_CLASSES = 3
+PATIENCE = 20
+
 
 if __name__ == '__main__':
     
@@ -107,63 +113,84 @@ if __name__ == '__main__':
     DIRS = helper_functions.createExp_dir(root + '/data')  
     
     # Read labels to dataframe with RLE encoding
-    df = helper_functions.scan_directory(src)
+    df = helper_functions.scan_directory(src, img_type='-labelled')
     # df = helper_functions.rle_directory(src, outname=DIRS['RLE_DATA'])
     
-    # create 5 folds train file
-    kf = KFold(n_splits=5, shuffle=True)
-    df['kfold']=-1
-    for fold, (train_index, test_index) in enumerate(kf.split(df.Image_ID)):
-            df.loc[test_index, 'kfold'] = fold
-    df.to_csv(DIRS['KFOLD'], index=False)
-    
-    # single fold training for now, rerun notebook to train for multi-fold
-    df = pd.read_csv(DIRS['KFOLD'])
-    TRAIN_DF = df.query(f'kfold!={FOLD_ID}').reset_index(drop=True)
-    VAL_DF   = df.query(f'kfold=={FOLD_ID}').reset_index(drop=True)    
-    
-    # Train transforms
-    TFMS = albu.Compose([albu.HorizontalFlip(),
-                         albu.Rotate(10),
-                         albu.Normalize(),
-                         ToTensor()])
-    
-    # Test transforms
-    TEST_TFMS = albu.Compose([albu.Normalize(), ToTensor(), ])
-    
-    # train dataset
-    train_dataset = Dataset(TRAIN_DF, src, TFMS) 
-    val_dataset   = Dataset(VAL_DF, src, TEST_TFMS)
-    
-    # dataloaders
-    train_dataloader = DataLoader(train_dataset, TRAIN_BATCH_SIZE, 
-                                  shuffle=True if not USE_SAMPLER else False, 
-                                  num_workers=num_workers, 
-                                  sampler=SAMPLER if USE_SAMPLER else None)
-    val_dataloader   = DataLoader(val_dataset, VALID_BATCH_SIZE, shuffle=False, num_workers=num_workers)
-    
     model = smp.Unet(
-        encoder_name='se_resnext50_32x4d', 
+        encoder_name='resnet50', 
         encoder_weights='imagenet', 
-        classes=3, 
+        classes=N_CLASSES, 
         activation=None,
     )
-    
-    if PRETRAINED: 
-        model.load_state_dict(torch.load(PRETRAINED_PATH))
         
     
     optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=[3,5,6,7,8,9,10,11,13,15], gamma=0.75)
+
+    es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
     
-    criterion = MixedLoss(10.0, 2.0) if not USE_CRIT else CRITERION 
-    es = helper_functions.EarlyStopping(patience=10, mode='max')
+    fig, ax = plt.subplots(nrows=1, ncols=1)
+    ax1 = ax.twinx()
+    plt.ion()
+    
+    train_score = []
+    test_score = []
+    h_train, h_test, h_legend = None, None, None
+    flag = True
+    
     
     if TRAIN_MODEL:
         for epoch in range(EPOCHS):
+            
+            # create 5 folds train file
+            kf = KFold(n_splits=5, shuffle=True)
+            df['kfold']=-1
+            for fold, (train_index, test_index) in enumerate(kf.split(df.Image_ID)):
+                    df.loc[test_index, 'kfold'] = fold
+            df.to_csv(DIRS['KFOLD'], index=False)
+            
+            # single fold training for now, rerun notebook to train for multi-fold
+            df = pd.read_csv(DIRS['KFOLD'])
+            TRAIN_DF = df.query(f'kfold!={FOLD_ID}').reset_index(drop=True)
+            VAL_DF   = df.query(f'kfold=={FOLD_ID}').reset_index(drop=True)
+            
+            # Train transforms
+            TFMS = albu.Compose([albu.HorizontalFlip(),
+                                 albu.Rotate(10),
+                                 albu.Normalize(),
+                                 ToTensor()])
+            
+            # Test transforms
+            TEST_TFMS = albu.Compose([albu.Normalize(), ToTensor(), ])
+            
+            # train dataset
+            train_dataset = Dataset(TRAIN_DF, src, TFMS)
+            val_dataset   = Dataset(VAL_DF, src, TEST_TFMS)
+            
+            # dataloaders
+            train_dataloader = DataLoader(train_dataset, TRAIN_BATCH_SIZE, shuffle=True, 
+                                          num_workers=num_workers)
+            val_dataloader   = DataLoader(val_dataset, VALID_BATCH_SIZE, shuffle=False, num_workers=num_workers)
+            
+            
             loss = train_one_epoch(train_dataloader, model, optimizer, criterion)
-            dice = helper_functions.evaluate(val_dataloader, model, metric=helper_functions.metric)
+            dice = helper_functions.evaluate(val_dataloader, model,
+                                             metric=helper_functions.metric,
+                                             n_classes=N_CLASSES)
+            
+            train_score.append(loss)
+            test_score.append(dice)
+                
+            h_train = ax.plot(train_score, color='orange', label='Training loss')
+            h_test = ax1.plot(test_score, color='blue', label='Dice validation score')
+            if flag:
+                h_legend = ax.legend()
+                h_legend1 = ax1.legend(loc='upper center')
+                flag = False
+            plt.show()
+            plt.pause(1)
+            
             scheduler.step()
             print(f"EPOCH: {epoch}, TRAIN LOSS: {loss}, VAL DICE: {dice}")
             es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(dice,4)}.bin")
@@ -171,10 +198,6 @@ if __name__ == '__main__':
             if es.early_stop:
                 print('\n\n -------------- EARLY STOPPING -------------- \n\n')
                 break
-    if EVALUATE:
-        valid_score = helper_functions.evaluate(val_dataloader,
-                                                model, metric=helper_functions.metric)
-        print(f"Valid dice score: {valid_score}")
 
 
 

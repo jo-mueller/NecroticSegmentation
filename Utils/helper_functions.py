@@ -15,6 +15,7 @@ import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
+import torch.nn.functional as F
 
 class AverageMeter:
     def __init__(self):
@@ -117,8 +118,9 @@ def metric(probability, truth, threshold=0.5, reduction='none'):
         num_pos = len(pos_index)
 
     return dice
+            
 
-def evaluate(valid_loader, model, device='cuda', metric=metric):
+def evaluate(valid_loader, model, device='cuda', n_classes=3, metric=metric):
     losses = AverageMeter()
     model = model.to(device)
     model.eval()
@@ -127,9 +129,8 @@ def evaluate(valid_loader, model, device='cuda', metric=metric):
         for b_idx, data in enumerate(tk0):
             for key, value in data.items():
                 data[key] = value.to(device)
-            out   = model(data['image'])
-            out   = torch.sigmoid(out)
-            dice  = metric(out, data['mask']).cpu()
+            out = torch.argmax(model(data['image']), dim=1)
+            dice = metric(out, data['mask']).cpu()
             losses.update(dice.mean().item(), valid_loader.batch_size)
             tk0.set_postfix(dice_score=losses.avg)
     return losses.avg
