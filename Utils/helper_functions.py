@@ -196,60 +196,18 @@ def scan_directory(directory, img_type='labels', outname=None):
     
     return df
 
-def rle2mask(string, width, height):
+def visualize_batch(sample):
+    n_batch = sample['image'].size()[0]
     
-    array = np.zeros((height, width)).flatten()
-    rle = [int(x) for x in string.split(' ')]
+    fig, axes = plt.subplots(nrows=2, ncols=n_batch, figsize=(12, 4))
     
-    vals = rle[::2]
-    runLengths = rle[1::2]
-    
-    index = 0
-    for i in range(len(vals)):
-        array[index:index + runLengths[i]] = vals[i]
-        index += runLengths[i]
-    
-    return array.reshape((-1, width))
-    
-
-def mask2rle(array):
-    
-    array = array.flatten()    
-    lastValue = -1
-    runLength = 0
-    rle = []
-
-    for x in array:
-        currentValue = x
+    for ibx in range(n_batch):
+        ax = axes[0, ibx]
+        im = ax.imshow(sample['mask'][ibx, 0].cpu().numpy())
+        [x.set_clim(0,2) for x in ax.get_images()]
         
-        if currentValue != lastValue:
-            rle.append(lastValue)
-            rle.append(runLength)
-            runLength = 1
-            lastValue = currentValue
-        else:
-            runLength +=1
-            
-    return ' '.join([str(x) for x in rle[2:]])
-
-def matplotlib_imshow(img, one_channel=False):
-    fig,ax = plt.subplots(figsize=(10,6))
-    ax.imshow(img.permute(1,2,0).numpy())
-    
-def visualize(**images):
-    """PLot images in one row."""
-    images = {k:v.numpy() for k,v in images.items() if isinstance(v, torch.Tensor)} #convert tensor to numpy 
-    n = len(images)
-    plt.figure(figsize=(16, 8))
-    image, mask = images['image'], images['mask']
-    
-    image = (image - image.min())/(image.max() - image.min())
-    
-    
-    plt.imshow(image.transpose(1,2,0), vmin=0, vmax=1)
-    if mask.max()>0:
-        plt.imshow(mask.squeeze(0), alpha=0.25)
-    plt.show()
+        ax = axes[1, ibx]
+        ax.imshow(sample['image'][ibx].cpu().numpy().transpose((1,2,0))/255)
     
 if __name__ == '__main__':
     root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation\src\Tiles'
