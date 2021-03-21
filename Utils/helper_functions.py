@@ -157,7 +157,7 @@ def createExp_dir(root):
             'TRAIN_IMG_DIR': dir_train,
             'TEST_IMG_DIR': dir_test,
             'KFOLD': os.path.join(base, 'RLE_kfold.csv'),
-            'RLE_DATA': os.path.join(base, 'RLE_tiles.csv')}
+            'Models': os.path.join(base, 'model')}
     
     return dirs
 
@@ -183,31 +183,41 @@ def scan_directory2(directory):
     
     return df
 
-def scan_directory(directory, img_type='labels', outname=None):
+def scan_directory(directory, img_ID='', img_type='tif', outname=None):
     """
     Scans directory with mixed image/label images for label images.
     Has to be tif. Returns a dataset with all images
     """
     images = os.listdir(directory)
-    images = [x for x in images if img_type in x and x.endswith('tif')]
+    images = [x for x in images if img_ID in x and x.endswith(img_type)]
     
     df = pd.DataFrame(columns=['Image_ID'])
     df['Image_ID'] = images
+    
+    if img_type == 'tif':
+        # check how many labels are ppresent in the respective image
+        n_labels = []
+        for i, entry in df.iterrows():
+            image = tf.imread(os.path.join(directory, entry.Image_ID))
+            n_labels.append(len(np.unique(np.argmax(image, axis=0))))
+        
+        df['has_all_labels'] = [True  if x == 3 else False for x in n_labels]
     
     return df
 
 def visualize_batch(sample):
     n_batch = sample['image'].size()[0]
+    keys = list(sample.keys())
     
-    fig, axes = plt.subplots(nrows=2, ncols=n_batch, figsize=(12, 4))
+    fig, axes = plt.subplots(nrows=len(keys), ncols=n_batch, figsize=(12, 4))
     
-    for ibx in range(n_batch):
-        ax = axes[0, ibx]
-        im = ax.imshow(sample['mask'][ibx, 0].cpu().numpy())
-        [x.set_clim(0,2) for x in ax.get_images()]
-        
-        ax = axes[1, ibx]
-        ax.imshow(sample['image'][ibx].cpu().numpy().transpose((1,2,0))/255)
+    for i, key in enumerate(keys):
+        for ibx in range(n_batch):
+            ax = axes[i, ibx]
+            img = sample[key][ibx].cpu().detach().numpy().transpose((1,2,0))
+            ax.imshow(img/img.max())
+        ax.set_ylabel(key)
+            
     
 if __name__ == '__main__':
     root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation\src\Tiles'
