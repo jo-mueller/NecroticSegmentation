@@ -161,27 +161,25 @@ def createExp_dir(root):
     
     return dirs
 
-def scan_directory2(directory):
-    """
-    Scans directory with raw tif images for Unet prpcessing.
 
-    Parameters
-    ----------
-    directory : path to directory with input image
-        Function will scan directory for tif images
-
-    Returns
-    -------
-    pandas dataframe 
+def scan_database(directory, img_type='czi'):
     """
-    
-    images = os.listdir(directory)
-    images = [x for x in images if x.endswith('tif')]
+    Scans a radiomics database and finds HE images
+    """
+    images = []
+    for root, subdirs, filenames in os.walk(directory):
+        
+        for filename in filenames:
+            if 'NK' in root:
+                continue
+            if 'HE' in filename and filename.endswith(img_type):
+                images.append(os.path.join(root, filename))
     
     df = pd.DataFrame(columns=['Image_ID'])
     df.Image_ID = images
     
     return df
+
 
 def scan_directory(directory, img_ID='', img_type='tif', outname=None):
     """
@@ -220,5 +218,5 @@ def visualize_batch(sample):
             
     
 if __name__ == '__main__':
-    root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation\src\Tiles'
-    # df = rle_directory(root)
+    root = r'E:\Promotion\Projects\2020_Radiomics\Data'
+    df = scan_database(root)
