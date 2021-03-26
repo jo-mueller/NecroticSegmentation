@@ -33,24 +33,49 @@ class InferenceDataset():
         self.augmentation = augmentation
         self.resolution = 0.4418 * 2**series
         
-        # Read czi image
-        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series)
-        self.resample(target_pixsize)
-        
-        # transpose if necessary
-        if self.image.shape[-1] == 3:
-            self.image = self.image.transpose((2, 0, 1))        
-        
         self.patch_size = patch_size
         self.stride = stride
         self.inner = patch_size - 2*self.stride
         self.offset = 0
+        
+        # Read czi image
+        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series)
+        self.resample(target_pixsize)
+        self.pad()
+        
+        # transpose if necessary
+        if self.image.shape[-1] == 3:
+            self.image = self.image.transpose((2, 0, 1))        
         
         self.prediction = np.zeros_like(self.image, dtype='float32')
         self.prediction[0,:,:] = 1  # background default to 100%
         
         # assign indeces on 2d grid
         self.index_map = np.arange(0, self.__len__(), 1).reshape(self.shape())
+        
+    def pad(self):
+        """
+        Expands image to have a size that's a integer factor of the tile size
+        """
+        
+        self.dimensions = self.image.shape
+        shape = np.ceil(np.asarray(self.image.shape)/self.patch_size) * self.patch_size
+        shape[np.argmin(shape)] = 3
+        
+        ds = shape - self.image.shape
+        width = self.image.shape[0]
+        height = self.image.shape[1]
+        
+        x = int(ds[0]//2)
+        xx = int(ds[0] - x)
+        
+        y = int(ds[1]//2)
+        yy = int(ds[1] - y)
+        
+        self.image = np.pad(self.image, ((x, xx), (y, yy), (0,0)),
+                            mode='constant', constant_values=0)
+        self.anchor = [x, y, width, height]
+        
         
     def resample(self, resolution):
         """
@@ -107,7 +132,7 @@ class InferenceDataset():
                         offset + stride + j*inner : offset + stride + j*inner + inner] += patch
         
             
-    def predict(self, model, device='cuda', batch_size=6, n_offsets=6, max_offset=128):
+    def predict(self, model, device='cuda', batch_size=6, n_offsets=3, max_offset=128):
         
         dataloader = DataLoader(self, batch_size=batch_size,
                                 shuffle=False, num_workers=4)
@@ -116,15 +141,15 @@ class InferenceDataset():
         
         with torch.no_grad():
             
-            for offset in offsets:
+            for offset in tqdm(offsets, desc='Offset'):
                 
-                tk0 = tqdm(dataloader, total=len(dataloader))
+                # tk0 = tqdm(dataloader, total=len(dataloader))
                 self.offset = offset
             
                 # iterate over dataloader
-                for i, data in enumerate(tk0):
+                for i, data in enumerate(dataloader):
                     
-                    tk0.set_postfix(offset=offset)
+                    # tk0.set_postfix(offset=offset)
                     data['image'] = data['image'].to(device).float()
                     
                     # out = data['image'].cpu().numpy()
@@ -135,14 +160,16 @@ class InferenceDataset():
                     # iteratively write results from batches to prediction map
                     for b_idx in range(out.shape[0]):
                         self[i*batch_size + b_idx] = out[b_idx]
-                    
-                self.prediction[0][self.prediction[0]==0] = 1
                         
+        # average predictions and undo padding
         self.prediction /= n_offsets
+        self.prediction = self.prediction[:,
+                                          self.anchor[0]: self.anchor[0] + self.anchor[2],
+                                          self.anchor[1]: self.anchor[1] + self.anchor[3]]
 
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
-RAW_DIR = root + r'\src\Raw'
-BST_MODEL = root + r'\data\\Experiment_20210320_150935\model\bst_model512_fold4_0.7847.bin'
+RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
+BST_MODEL = root + r'\data\Experiment_20210323_072121\model\bst_model512_fold4_0.7433.bin'
 DEVICE = 'cuda'
 PATCH_SIZE = 512
 STRIDE = 32
@@ -168,19 +195,12 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(BST_MODEL))
     model = model.to(DEVICE)
     
-    samples = helper_functions.scan_directory(RAW_DIR, img_type='czi')
+    samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
     
     for i, sample in enumerate(samples.Image_ID):
         test_dataset = InferenceDataset(RAW_DIR, sample,
                                         patch_size=PATCH_SIZE, stride=STRIDE)
-        # blubb = test_dataset[0]
         test_dataset.predict(model, batch_size=batch_size)
-        plt.figure()
-        plt.imshow(test_dataset.prediction[0,:,:])
-        plt.figure()
-        plt.imshow(test_dataset.prediction[1,:,:])
-        plt.figure()
-        plt.imshow(test_dataset.prediction[2,:,:])
         
     javabridge.kill_vm()
 
