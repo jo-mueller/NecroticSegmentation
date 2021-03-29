@@ -13,7 +13,7 @@ import tifffile as tf
 import cv2
 import matplotlib.pyplot as plt
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, KFold
 import segmentation_models_pytorch as smp
 from Utils import helper_functions
 
@@ -24,30 +24,24 @@ from torch.nn import CrossEntropyLoss
 import albumentations as A
 
 class Dataset():
-    def __init__(self, rle_df, image_base_dir, augmentation=None):
-        self.df             = rle_df
+    def __init__(self, df, image_base_dir, augmentation=None):
+        self.df             = df
         self.image_base_dir = image_base_dir
-        self.image_ids      = rle_df.Image_ID.values
+        self.image_ids      = df.Image_ID.values
         self.augmentation   = augmentation
     
     def __getitem__(self, i):
-        image_id  = self.image_ids[i]
         
-        mask_path = os.path.join(self.image_base_dir, image_id)
-        img_path = mask_path.replace('-labelled', '')
+        mask_path = os.path.join(self.image_base_dir, self.df.Mask_ID.loc[i])
+        img_path = os.path.join(self.image_base_dir, self.df.Image_ID.loc[i])
+        
         image = cv2.imread(img_path, 1).astype(float)
-        image[:,(np.sum(image, axis=0) == 0)] = 255
-        
-        # mask = tf.imread(mask_path)
         mask = np.argmax(tf.imread(mask_path), axis=0)
-        # mask = mask[None, :, :]
         
         if self.augmentation:
             sample = self.augmentation(image=image, mask=mask)
             image, mask= sample['image'], sample['mask']
             
-        
-        
         return {'image': image.transpose((2,0,1)), 'mask' : mask[None,: , :]}
         
     def __len__(self):
@@ -59,20 +53,20 @@ src = root + r'\src\QuPath_Tiling\tiles'
 
 # Config
 FOLD_ID = 4
-BATCH_SIZE = 6
+BATCH_SIZE = 20
 USE_SAMPLER = False
 SAMPLER  = None
 num_workers = 0
 LEARNING_RATE = 2e-5
 criterion = CrossEntropyLoss()
 TRAIN_MODEL = True
-EPOCHS = 100
-IMG_SIZE = 512
+EPOCHS = 150
+IMG_SIZE = 256
 EVALUATE = True
 N_CLASSES = 3
 PATIENCE = 40
 device= 'cuda'
-keep_chekpoints = True
+keep_checkpoints = True
 
 styles = ['--', '-', ':']
 
@@ -83,7 +77,7 @@ if __name__ == '__main__':
     DIRS = helper_functions.createExp_dir(root + '/data')  
     
     # Read label tiles to dataframe
-    df = helper_functions.scan_directory(src, img_ID='-labelled')
+    df = helper_functions.scan_directory(src)
     
     model = smp.Unet(
         encoder_name='resnet50', 
@@ -105,23 +99,19 @@ if __name__ == '__main__':
     ])
     
     aug_test = A.Compose([
-        # A.Normalize()
-        # A.ToTensorV2()
-    ])
+        ])
 
-    
-
-    
     optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[3,5,6,7,8,9,10,11,13,15], gamma=0.75)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
+                                                     milestones=[10, 30, 50, 70, 90],
+                                                     gamma=0.75)
 
     es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
     
     # create 5 folds train/test groups
-    kf = StratifiedKFold(n_splits=5, shuffle=True)
+    kf = KFold(n_splits=5, shuffle=True)
     df['kfold']=-1
-    for fold, (train_index, test_index) in enumerate(kf.split(X = df.Image_ID, y=df.has_all_labels)):
+    for fold, (train_index, test_index) in enumerate(kf.split(X = df.Image_ID)):
             df.loc[test_index, 'kfold'] = fold
     
     # single fold training for now, rerun notebook to train for multi-fold
@@ -137,7 +127,9 @@ if __name__ == '__main__':
     val_dataloader   = DataLoader(val_dataset, BATCH_SIZE, shuffle=False, num_workers=num_workers)
     
     fig, ax = plt.subplots(nrows=1, ncols=1)
+    ax.set_ylabel('Training loss')
     ax1 = ax.twinx()
+    ax1.set_ylabel('Dice validation score')
     plt.ion()
     
     train_score = []
@@ -161,7 +153,6 @@ if __name__ == '__main__':
                     data[key] = value.to(device).float()
                     
                 # train
-                
                 data['prediction']  = model(data['image'])
                 loss = criterion(data['prediction'], data['mask'][:, 0].long())
                 loss.backward()
