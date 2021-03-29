@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import torch
 import os
 import tifffile as tf
+import cv2
 import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
@@ -167,6 +168,7 @@ def scan_database(directory, img_type='czi'):
     Scans a radiomics database and finds HE images
     """
     images = []
+    dirs = []
     for root, subdirs, filenames in os.walk(directory):
         
         for filename in filenames:
@@ -174,34 +176,49 @@ def scan_database(directory, img_type='czi'):
                 continue
             if 'HE' in filename and filename.endswith(img_type):
                 images.append(os.path.join(root, filename))
+                dirs.append(root)
     
-    df = pd.DataFrame(columns=['Image_ID'])
+    df = pd.DataFrame(columns=['Image_ID', 'Directory'])
     df.Image_ID = images
+    df.Directory = dirs
     
     return df
 
 
-def scan_directory(directory, img_ID='', img_type='tif', outname=None):
+def scan_directory(directory, img_ID='.tif', mask_ID = '-labelled.tif', img_type='tif', outname=None):
     """
     Scans directory with mixed image/label images for label images.
     Has to be tif. Returns a dataset with all images
     """
-    images = os.listdir(directory)
-    images = [x for x in images if img_ID in x and x.endswith(img_type)]
     
-    df = pd.DataFrame(columns=['Image_ID'])
+    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels'])
+    
+    files = os.listdir(directory)
+    masks = [x for x in files if mask_ID in x]
+    images = [x.replace(mask_ID, img_ID) for x in masks]
     df['Image_ID'] = images
+    df['Mask_ID'] = masks
     
-    if img_type == 'tif':
-        # check how many labels are ppresent in the respective image
-        n_labels = []
-        for i, entry in df.iterrows():
-            image = tf.imread(os.path.join(directory, entry.Image_ID))
-            n_labels.append(len(np.unique(np.argmax(image, axis=0))))
+    to_delete = []
+    
+    for i, sample in tqdm(df.iterrows()):
+        label = cv2.imread(os.path.join(directory, sample.Mask_ID), 1)
+        label = np.argmax(label, axis=2)
+        df.loc[i, ('has_all_labels')] = len(np.unique(label))
         
-        df['has_all_labels'] = [True  if x == 3 else False for x in n_labels]
+        img = tf.imread(os.path.join(directory, sample.Image_ID))
+        if np.sum((img == 255) + (img == 0)) > 100:
+            has_background = True
+        else:
+            has_background = False
+            
+        if has_background:
+            to_delete.append(i)
+            
+    df.drop(to_delete, axis=0, inplace=True)
+    df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
     
-    return df
+    return df.reset_index()
 
 def visualize_batch(sample):
     n_batch = sample['image'].size()[0]
