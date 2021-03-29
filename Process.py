@@ -11,14 +11,17 @@ Source: https://github.com/amaarora/amaarora.github.io/blob/master/nbs/Training.
 
 import javabridge
 import bioformats
+import cv2
+import tifffile as tf
 import os
 from Utils import helper_functions
 from tqdm import tqdm
 import numpy as np
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from skimage.transform import resize
 
 import albumentations as A
+from albumentations.augmentations.transforms import PadIfNeeded
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 import torch
@@ -48,7 +51,6 @@ class InferenceDataset():
             self.image = self.image.transpose((2, 0, 1))        
         
         self.prediction = np.zeros_like(self.image, dtype='float32')
-        self.prediction[0,:,:] = 1  # background default to 100%
         
         # assign indeces on 2d grid
         self.index_map = np.arange(0, self.__len__(), 1).reshape(self.shape())
@@ -132,48 +134,68 @@ class InferenceDataset():
                         offset + stride + j*inner : offset + stride + j*inner + inner] += patch
         
             
-    def predict(self, model, device='cuda', batch_size=6, n_offsets=3, max_offset=128):
+    def predict(self, model, device='cuda', batch_size=6, n_offsets=3, max_offset=16):
         
         dataloader = DataLoader(self, batch_size=batch_size,
                                 shuffle=False, num_workers=4)
         
-        offsets = np.arange(0, max_offset)[::int(max_offset/n_offsets)]
+        if n_offsets == 0:
+            offsets = [0]
+        else:
+            offsets = np.arange(0, max_offset)[::int(max_offset/n_offsets)]
         
         with torch.no_grad():
             
-            for offset in tqdm(offsets, desc='Offset'):
+            tk0 = tqdm(offsets, desc=os.path.basename(self.filename), total=len(offsets))
+            for offset in tk0:
                 
-                # tk0 = tqdm(dataloader, total=len(dataloader))
                 self.offset = offset
-            
+
                 # iterate over dataloader
                 for i, data in enumerate(dataloader):
                     
-                    # tk0.set_postfix(offset=offset)
                     data['image'] = data['image'].to(device).float()
-                    
-                    # out = data['image'].cpu().numpy()
-                    out = data['image'].cpu().numpy()
                     out = model(data['image'])
                     out = torch.sigmoid(out).detach().cpu().numpy()
+                    
+                    tk0.set_postfix(offset=offset, batch=i)
                     
                     # iteratively write results from batches to prediction map
                     for b_idx in range(out.shape[0]):
                         self[i*batch_size + b_idx] = out[b_idx]
                         
         # average predictions and undo padding
-        self.prediction /= n_offsets
+        self.prediction /= (n_offsets + 1)
         self.prediction = self.prediction[:,
                                           self.anchor[0]: self.anchor[0] + self.anchor[2],
                                           self.anchor[1]: self.anchor[1] + self.anchor[3]]
+        
+        # self.postprocess()
+    
+    def postprocess(self, Class_cutoffs=[0.5, 0.5, 0.4]):
+        """
+        Create labelmap from probabilities
+        """
+        for i in range(len(Class_cutoffs)):
+            self.prediction[i] = (self.prediction[i] > Class_cutoffs[i]) * i
+        self.prediction = np.argmax(self.prediction, axis=0)
+        
+    
+    def export(self, filename):
+        """
+        Export prediction map to file with deflation compression
+        """
+        
+        tf.imwrite(filename, self.prediction)
 
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-BST_MODEL = root + r'\data\Experiment_20210323_072121\model\bst_model512_fold4_0.7433.bin'
+BST_MODEL = root + r'\data\Experiment_20210328_221305_4µm5_ts256_bs20\model\bst_model256_fold4_0.7073.bin'
 DEVICE = 'cuda'
-PATCH_SIZE = 512
-STRIDE = 32
-batch_size = 6
+PATCH_SIZE = 256
+STRIDE = 16
+batch_size = 20
+Redo = True
 
 
 if __name__ == '__main__':
@@ -188,7 +210,8 @@ if __name__ == '__main__':
     )
     
     aug_test = A.Compose([
-        A.Normalize()
+        A.Normalize(),
+        PadIfNeeded(min_width=PATCH_SIZE, min_height=PATCH_SIZE)
         # A.ToTensorV2()
     ])
     
@@ -197,10 +220,21 @@ if __name__ == '__main__':
     
     samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
     
-    for i, sample in enumerate(samples.Image_ID):
-        test_dataset = InferenceDataset(RAW_DIR, sample,
-                                        patch_size=PATCH_SIZE, stride=STRIDE)
-        test_dataset.predict(model, batch_size=batch_size)
+    for i, sample in samples.iterrows():
+        outpath = os.path.join(sample.Directory, '1_seg', 'HE_seg_DL.tif')
+        
+        if os.path.exists(outpath) and not Redo:
+            continue
+        else:
+            try:
+                ds = InferenceDataset(RAW_DIR, sample.Image_ID,
+                                      patch_size=PATCH_SIZE, stride=STRIDE)
+                ds.predict(model, batch_size=batch_size)
+                ds.export(outpath)
+            except Exception:
+                print('Error in {:s}'.format(sample.Image_ID))
+                pass
+
         
     javabridge.kill_vm()
 
