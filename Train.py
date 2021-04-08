@@ -8,10 +8,11 @@ Created on Wed Mar 10 12:48:39 2021
 import os
 from tqdm import tqdm
 import numpy as np
-import pandas as pd
 import tifffile as tf
 import cv2
 import matplotlib.pyplot as plt
+
+import yaml
 
 from sklearn.model_selection import StratifiedKFold, KFold
 import segmentation_models_pytorch as smp
@@ -49,27 +50,24 @@ class Dataset():
 
 
 root = os.getcwd()
-src = root + r'\src\QuPath_Tiling\tiles'
+src = root + r'\src\QuPath_Tiling\tiles_512_3.0'
 
 # Config
 FOLD_ID = 4
-BATCH_SIZE = 20
+BATCH_SIZE =6
 USE_SAMPLER = False
 SAMPLER  = None
 num_workers = 0
 LEARNING_RATE = 2e-5
 criterion = CrossEntropyLoss()
-TRAIN_MODEL = True
-EPOCHS = 150
-IMG_SIZE = 256
+EPOCHS = 100
+IMG_SIZE = int(os.path.basename(src).split('_')[1])
+PIX_SIZE = float(os.path.basename(src).split('_')[2])
 EVALUATE = True
 N_CLASSES = 3
-PATIENCE = 40
+PATIENCE = 15
 device= 'cuda'
 keep_checkpoints = True
-
-styles = ['--', '-', ':']
-
 
 if __name__ == '__main__':
     
@@ -90,28 +88,27 @@ if __name__ == '__main__':
     model.train()
     
     aug_train = A.Compose([
-        A.VerticalFlip(p=0.5),              
+        A.VerticalFlip(p=0.5),     
+        A.HorizontalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.OneOf([
-            A.ElasticTransform(alpha=120, sigma=120 * 0.05, alpha_affine=120 * 0.03, p=0.5),
-            A.GridDistortion(p=0.5)         
-        ], p=0.8)
+        A.Normalize()
     ])
     
     aug_test = A.Compose([
+        A.Normalize()
         ])
 
     optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
-                                                     milestones=[10, 30, 50, 70, 90],
-                                                     gamma=0.75)
+    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
+    #                                                  milestones=[3, 5, 11, 15, 19],
+    #                                                  gamma=0.75)
 
     es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
     
     # create 5 folds train/test groups
-    kf = KFold(n_splits=5, shuffle=True)
+    kf = StratifiedKFold(n_splits=5, shuffle=True)
     df['kfold']=-1
-    for fold, (train_index, test_index) in enumerate(kf.split(X = df.Image_ID)):
+    for fold, (train_index, test_index) in enumerate(kf.split(X = df.Image_ID, y=df.has_all_labels)):
             df.loc[test_index, 'kfold'] = fold
     
     # single fold training for now, rerun notebook to train for multi-fold
@@ -122,105 +119,92 @@ if __name__ == '__main__':
     train_dataset = Dataset(TRAIN_DF, src, aug_train)
     val_dataset   = Dataset(VAL_DF, src, aug_test)
     
-    # dataloaders
+    # dataloaders & PerformanceMeter
     train_dataloader = DataLoader(train_dataset, BATCH_SIZE, shuffle=True, num_workers=num_workers)
     val_dataloader   = DataLoader(val_dataset, BATCH_SIZE, shuffle=False, num_workers=num_workers)
+    Monitor = helper_functions.PerformanceMeter()
     
-    fig, ax = plt.subplots(nrows=1, ncols=1)
-    ax.set_ylabel('Training loss')
-    ax1 = ax.twinx()
-    ax1.set_ylabel('Dice validation score')
-    plt.ion()
-    
+    # score lists
     train_score = []
     test_score = []
-    h_train, h_legend = None, None
-    h_test  = [None for x in range(N_CLASSES)]
-    flag = True
     
-    if TRAIN_MODEL:
-        for epoch in range(EPOCHS):
+    # train
+    for epoch in range(EPOCHS):
+        
+        optimizer.zero_grad()
+        tk0 = tqdm(train_dataloader, total=len(train_dataloader))
+        
+        visualize_flag = True
+        for b_idx, data in enumerate(tk0):
             
+            # move images on GPU
+            for key, value in data.items():
+                data[key] = value.to(device).float()
+                
             # train
-            optimizer.zero_grad()
-            tk0 = tqdm(train_dataloader, total=len(train_dataloader))
-            
-            visualize_flag = True
-            for b_idx, data in enumerate(tk0):
-                
-                # move images on GPU
-                for key, value in data.items():
-                    data[key] = value.to(device).float()
-                    
-                # train
-                data['prediction']  = model(data['image'])
-                loss = criterion(data['prediction'], data['mask'][:, 0].long())
-                loss.backward()
-                optimizer.step()
-                tk0.set_postfix(loss=loss.cpu().detach().numpy())
-                
-                # try:
-                #     if np.mean(test_score[-1]) > 0.65 and visualize_flag:
-                        
-                #         helper_functions.visualize_batch(data)
-                #         visualize_flag = False
-                # except Exception:
-                #     pass
+            data['prediction']  = model(data['image'])
+            loss = criterion(data['prediction'], data['mask'][:, 0].long())
+            loss.backward()
+            optimizer.step()
+            tk0.set_postfix(loss=loss.cpu().detach().numpy())
 
-            # evaluate
-            with torch.no_grad():
-                tk1 = tqdm(val_dataloader, total=len(val_dataloader))
-                dice = np.zeros(N_CLASSES)
-                for b_idx, data in enumerate(tk1):
-                    
-                    # Eval
-                    out = model(data['image'].to(device).float())                 
-                    out = torch.argmax(out, dim=1).view(-1)
-                    mask = data['mask'].view(-1)
-                    
-                    dice += jaccard_score(mask.cpu(), out.cpu(), average=None)
-                    tk1.set_postfix(score=np.mean(dice))
+        # evaluate
+        with torch.no_grad():
+            tk1 = tqdm(val_dataloader, total=len(val_dataloader))
+            dice = np.zeros(N_CLASSES)
+            for b_idx, data in enumerate(tk1):
                 
-                dice /= len(tk1)
-                train_score.append(loss.cpu().detach())
-                test_score.append(dice)
+                # Eval
+                out = model(data['image'].to(device).float())                 
+                out = torch.argmax(out, dim=1).view(-1)
+                mask = data['mask'].view(-1)
                 
-            h_train = ax.plot(train_score, color='orange', label='Training loss')
+                dice += jaccard_score(mask.cpu(), out.cpu(), average=None)
+                tk1.set_postfix(score=np.mean(dice))
             
-            try:
-                [ax1.lines.pop(i) for i in range(N_CLASSES)]
-            except Exception:
-                pass
-                
-            for i in range(len(dice)):
-                score = np.concatenate( test_score, axis=0 ).reshape(-1, 3)
-                h_test[i] = ax1.plot(score[:,i], color='blue',
-                                     label='Dice score label {:d}'.format(i),
-                                     linestyle=styles[i])
-
-            if flag:
-                h_legend = ax.legend()
-                h_legend1 = ax1.legend(loc='upper center')
-                flag = False
-            plt.show()
-            plt.pause(1)
+            dice /= len(tk1)
+            train_score.append(loss.cpu().detach())
+            test_score.append(dice)
             
-            scheduler.step()
-            dice = np.mean(dice)
-            print(f"EPOCH: {epoch}, TRAIN LOSS: {loss}, VAL DICE: {dice}")
-            es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(dice, 4)}.bin")
-            best_model = f"../data/bst_model{IMG_SIZE}__fold{FOLD_ID}_{np.round(es.best_score,4)}.bin"
-            if es.early_stop:
-                print('\n\n -------------- EARLY STOPPING -------------- \n\n')
-                break
+        Monitor.update(train_loss=loss.cpu().detach(), valid_score=dice)
+        
+        dice = np.mean(dice)
+        print(f"EPOCH: {epoch}, TRAIN LOSS: {loss}, VAL DICE: {dice}")
+        es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(dice, 4)}.bin")
+        best_model = f"bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(es.best_score,4)}.bin"
+        if es.early_stop:
+            helper_functions.visualize_batch(data)
+            print('\n\n -------------- EARLY STOPPING -------------- \n\n')
+            break
 
-    # # keep only most recent model
-    # if not keep_chekpoints:
-    #     models =  os.listdir(DIRS['Models'])
-    #     models = [os.path.join(DIRS['Models'], x) for x in models]
-    #     for model in models:
-    #         if not model
-    #     [os.path.remove(os.path.join(DIRS['Models'] + model))]
+    # keep only best model
+    models =  os.listdir(DIRS['Models'])
+    for model in models:
+        if not model == best_model:
+            os.remove(os.path.join(DIRS['Models'], model))
+            
+    # save performance data and config
+    Monitor.figure.savefig(os.path.join(DIRS['Performance'], 'Training_Validation_Loss.png'))
+    
+    Config = {
+    'Hyperparameters': {
+        'BATCH_SIZE' : BATCH_SIZE,
+        'LEARNING_RATE': LEARNING_RATE,
+        'CRITERION': criterion.__str__(),
+        'EPOCHS': EPOCHS,
+        'N_CLASSES': N_CLASSES,
+        'PATIENCE': PATIENCE},
+    'Input':{
+        'IMG_SIZE': IMG_SIZE,
+        'PIX_SIZE': PIX_SIZE},
+    'Output':{
+        'Best_model': os.path.join(DIRS['Models'], best_model)
+        }
+    }
+    
+    with open(os.path.join(DIRS['EXP_DIR'], "params.yaml"), 'w') as yamlfile:
+        data = yaml.dump(Config, yamlfile)
+    
     
 
 
