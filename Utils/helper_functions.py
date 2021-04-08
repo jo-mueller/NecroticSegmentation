@@ -11,31 +11,70 @@ import matplotlib.pyplot as plt
 import torch
 import os
 import tifffile as tf
-import cv2
+# import cv2
 import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
-import torch.nn.functional as F
+# import torch.nn.functional as F
 
-class AverageMeter:
+class PerformanceMeter:
     def __init__(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
+        
+        # Make plot for performance display
+        self.figure, self.TrainAx = plt.subplots(nrows=1, ncols=1)
+        self.ValidAx = self.TrainAx.twinx()
+        plt.ion()
+        
+        self.train_score = []
+        self.valid_score = []
+        
+        # Prepare legend
+        self.valid_curve = []
+        self.loss_curve = self.TrainAx.plot([],
+                                            color='orange',
+                                            label='Training loss')[0]
+        
+        self.styles = {0: '-', 1: '--', 2: ':'}
+        self.labels = {0: 'Background', 1: 'Necrosis', 2: 'Vital'}
+        plt.show()
+        
+    def update(self, train_loss, valid_score):
+        self.train_score.append(train_loss)
+        self.valid_score.append(valid_score)
+        
+        # clear previous curves
+        self.TrainAx.clear()
+        self.ValidAx.clear()
+        
+        # Replot
+        x = np.arange(0, len(self.train_score), 1)
+        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)            
+        h_loss = self.TrainAx.plot(x, self.train_score,
+                                   color='orange',
+                                   label='Training loss')[0]
+        h_valid = []
+        
+        for i in range(3):
+            h_valid.append(self.ValidAx.plot(x, valid_score[:,i],
+                                             color='blue',
+                                             linestyle=self.styles[i],
+                                             label=self.labels[i])[0])
+            
+        # Legend
+        lines = [h_loss] + h_valid
+        labels = ['Training loss'] + [self.labels[i] for i in self.labels.keys()]
+        self.TrainAx.legend(lines, labels, loc='lower center',
+                            bbox_to_anchor=(0.5, 1.03), fancybox=True,
+                            shadow=True, ncol=4)
+        
+        # Ax labels
+        self.TrainAx.set_ylabel('Training loss')
+        self.ValidAx.set_ylabel('Dice validation score')
+        self.ValidAx.set_ylim(0,1)
+        self.TrainAx.set_xlabel('Epoch [#]')
+        
+        plt.show()
         
         
 class EarlyStopping:
@@ -72,6 +111,7 @@ class EarlyStopping:
         else:
             self.best_score = score
             self.save_checkpoint(epoch_score, model, model_path)
+            self.model_path = model_path
             self.counter = 0
 
     def save_checkpoint(self, epoch_score, model, model_path):
@@ -149,16 +189,19 @@ def createExp_dir(root):
     base = os.path.join(root, 'Experiment_' + time_string)
     dir_test = os.path.join(base, 'Test')
     dir_train = os.path.join(base, 'Train')
-    os.mkdir(base)
+    dir_perf = os.path.join(base, 'Performance')
     
+    os.mkdir(base)
     os.mkdir(dir_train)
     os.mkdir(dir_test)
+    os.mkdir(dir_perf)
     
     dirs = {'EXP_DIR': base,
             'TRAIN_IMG_DIR': dir_train,
             'TEST_IMG_DIR': dir_test,
             'KFOLD': os.path.join(base, 'RLE_kfold.csv'),
-            'Models': os.path.join(base, 'model')}
+            'Models': os.path.join(base, 'model'),
+            'Performance': dir_perf}
     
     return dirs
 
@@ -183,15 +226,25 @@ def scan_database(directory, img_type='czi'):
     df.Directory = dirs
     
     return df
+    
+def get_nlabels(label):
+    
+    chs = np.min(label.shape)
+    label = label.reshape(chs, -1).sum(axis=1)
+    return np.sum(label > 0) + 1
+    
 
-
-def scan_directory(directory, img_ID='.tif', mask_ID = '-labelled.tif', img_type='tif', outname=None):
+def scan_directory(directory, img_ID='.tif',
+                   mask_ID = '-labelled.tif', img_type='tif', outname=None, **kwargs):
     """
     Scans directory with mixed image/label images for label images.
     Has to be tif. Returns a dataset with all images
     """
     
-    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels'])
+    remove_empty_tiles = kwargs.get('remove_empty_tiles', True)
+    
+    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels',
+                               'Is_Background'])
     
     files = os.listdir(directory)
     masks = [x for x in files if mask_ID in x]
@@ -199,23 +252,23 @@ def scan_directory(directory, img_ID='.tif', mask_ID = '-labelled.tif', img_type
     df['Image_ID'] = images
     df['Mask_ID'] = masks
     
-    to_delete = []
-    
-    for i, sample in tqdm(df.iterrows()):
-        label = cv2.imread(os.path.join(directory, sample.Mask_ID), 1)
-        label = np.argmax(label, axis=2)
-        df.loc[i, ('has_all_labels')] = len(np.unique(label))
+    for i, sample in df.iterrows():
         
-        img = tf.imread(os.path.join(directory, sample.Image_ID))
-        if np.sum((img == 255) + (img == 0)) > 100:
-            has_background = True
-        else:
-            has_background = False
+        label = tf.imread(os.path.join(directory, sample.Mask_ID))
+        df.loc[i, ('has_all_labels')] = get_nlabels(label)
+        df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False               
             
-        if has_background:
-            to_delete.append(i)
-            
-    df.drop(to_delete, axis=0, inplace=True)
+    if remove_empty_tiles:
+        for i, sample in df.iterrows():
+            if sample.Is_Background:
+                f_mask = os.path.join(directory, sample.Mask_ID)
+                f_img = os.path.join(directory, sample.Image_ID)
+                
+                os.remove(f_mask)
+                os.remove(f_img)
+        
+        df = df[df.Is_Background == False]
+        
     df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
     
     return df.reset_index()
@@ -231,9 +284,13 @@ def visualize_batch(sample):
             ax = axes[i, ibx]
             img = sample[key][ibx].cpu().detach().numpy().transpose((1,2,0))
             ax.imshow(img/img.max())
-        ax.set_ylabel(key)
+    axes[0,0].set_ylabel('Raw image')
+    axes[1,0].set_ylabel('Mask image')
+    axes[2,0].set_ylabel('Prediction')
             
     
-if __name__ == '__main__':
-    root = r'E:\Promotion\Projects\2020_Radiomics\Data'
-    df = scan_database(root)
+# if __name__ == '__main__':
+#     A = PerformanceMeter()
+#     A.update(0.52, [0.9, 0.8, 0.7])
+#     A.update(0.45, [0.9, 0.8, 0.7])
+#     A.update(0.35, [0.9, 0.8, 0.7])
