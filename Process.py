@@ -14,6 +14,7 @@ import bioformats
 import cv2
 import tifffile as tf
 import os
+import yaml
 from Utils import helper_functions
 from tqdm import tqdm
 import numpy as np
@@ -29,7 +30,8 @@ import torch
 
 class InferenceDataset():
     def __init__(self, image_base_dir, filename, augmentation=None,
-                 patch_size=512, stride=16, n_classes=3, series=3, target_pixsize = 3.5):
+                 patch_size=512, stride=16, n_classes=3, series=3, target_pixsize = 2.0,
+                 max_offset=128, n_offsets=3):
         
         self.image_base_dir = image_base_dir
         self.filename = os.path.join(image_base_dir, filename)
@@ -38,45 +40,57 @@ class InferenceDataset():
         
         self.patch_size = patch_size
         self.stride = stride
-        self.inner = patch_size - 2*self.stride
+        self.inner = patch_size - 2*stride
         self.offset = 0
+        self.max_offset = max_offset
+        self.n_offsets = n_offsets
         
         # Read czi image
-        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series)
+        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series).astype(float)
         self.resample(target_pixsize)
-        self.pad()
         
         # transpose if necessary
         if self.image.shape[-1] == 3:
-            self.image = self.image.transpose((2, 0, 1))        
+            self.image = self.image.transpose((2, 0, 1))
         
         self.prediction = np.zeros_like(self.image, dtype='float32')
         
-        # assign indeces on 2d grid
-        self.index_map = np.arange(0, self.__len__(), 1).reshape(self.shape())
+        # assign indeces on 2d grid and pad to prevent index errors
+        self.create_index_map()
+        self.pad()
         
     def pad(self):
         """
         Expands image to have a size that's a integer factor of the tile size
         """
         
+        # see how many tiles fit in the raw image and round up
         self.dimensions = self.image.shape
-        shape = np.ceil(np.asarray(self.image.shape)/self.patch_size) * self.patch_size
-        shape[np.argmin(shape)] = 3
+        shape = np.ceil(np.asarray(self.image.shape)/self.inner) * self.inner
+        shape[np.argmin(shape)] = 3  # force channel dimension to 3
         
+        #  difference in shape
         ds = shape - self.image.shape
-        width = self.image.shape[0]
-        height = self.image.shape[1]
         
-        x = int(ds[0]//2)
-        xx = int(ds[0] - x)
+        # preserve old shape for later cropping
+        width = self.image.shape[1]
+        height = self.image.shape[2]
+        self.anchor = [0, 0, width, height]
         
-        y = int(ds[1]//2)
-        yy = int(ds[1] - y)
+        # calculate left/right/top/down padding margins
+        # Add offset to prevent overshoot at edges
+        x = 0
+        xx = int(ds[1] - x) + self.max_offset
         
-        self.image = np.pad(self.image, ((x, xx), (y, yy), (0,0)),
+        y = 0
+        yy = int(ds[2] - y) + self.max_offset
+        
+        # Execute padding
+        self.image = np.pad(self.image, ((0,0), (x, xx), (y, yy)),
                             mode='constant', constant_values=0)
-        self.anchor = [x, y, width, height]
+        self.prediction = np.pad(self.prediction, ((0,0), (x, xx), (y, yy)),
+                            mode='constant', constant_values=0)
+        
         
         
     def resample(self, resolution):
@@ -89,35 +103,41 @@ class InferenceDataset():
         self.image = resize(self.image, np.floor(outsize))
         self.resolution /= factor
         
-    def shape(self):
-        return (np.array(self.image.shape[1:]))//self.inner
+    def create_index_map(self):
+        
+        shape = (np.array(self.image.shape[1:]))//self.inner
+        self.index_map = np.arange(0, shape[0] * shape[1], 1).reshape(shape)
+        
         
     def __len__(self):
-        return self.shape()[0] * self.shape()[1]
+        return np.max(self.index_map)
     
     def __getitem__(self, key):
         
-        
-        ind = np.argwhere(self.index_map == key)[0]
+        try:
+            ind = np.argwhere(self.index_map == key)[0]
+        except Exception:
+            pass
         i, j = ind[0], ind[1]
         
-        stride = self.stride
         inner = self.inner
         offset = self.offset
        
         image = self.image[:, 
-                           offset + i*inner: offset + i*inner + inner + 2*stride,
-                           offset + j*inner: offset + j*inner + inner + 2*stride]
+                           offset + i*inner: offset + i*inner + inner,
+                           offset + j*inner: offset + j*inner + inner]
         
         if self.augmentation:
-            sample = self.augmentation(image=image)
-            image = sample['image']
+            sample = self.augmentation(image=image.transpose((1,2,0)))
+            image = sample['image'].transpose((2,0,1))
 
         return {'image': image}
     
     def __setitem__(self, key, value):
-        
-        ind = np.argwhere(self.index_map == key)[0]
+        try:
+            ind = np.argwhere(self.index_map == key)[0]
+        except Exception:
+            pass
         i, j = ind[0], ind[1]
         
         # crop center of processed tile
@@ -125,24 +145,20 @@ class InferenceDataset():
                       self.stride : self.patch_size - self.stride,
                       self.stride : self.patch_size - self.stride]
         
-        stride = self.stride
         inner = self.inner
         offset = self.offset
         
         self.prediction[:,
-                        offset + stride + i*inner : offset + stride + i*inner + inner,
-                        offset + stride + j*inner : offset + stride + j*inner + inner] += patch
+                        offset + i*inner : offset + i*inner + inner,
+                        offset + j*inner : offset + j*inner + inner] += patch
         
             
-    def predict(self, model, device='cuda', batch_size=6, n_offsets=3, max_offset=16):
-        
-        dataloader = DataLoader(self, batch_size=batch_size,
-                                shuffle=False, num_workers=4)
-        
-        if n_offsets == 0:
+    def predict(self, model, device='cuda', batch_size=6):
+                
+        if self.n_offsets == 0:
             offsets = [0]
         else:
-            offsets = np.arange(0, max_offset)[::int(max_offset/n_offsets)]
+            offsets = np.arange(0, self.max_offset)[::int(self.max_offset/self.n_offsets)]
         
         with torch.no_grad():
             
@@ -150,7 +166,9 @@ class InferenceDataset():
             for offset in tk0:
                 
                 self.offset = offset
-
+                dataloader = DataLoader(self, batch_size=batch_size,
+                        shuffle=False, num_workers=0)
+    
                 # iterate over dataloader
                 for i, data in enumerate(dataloader):
                     
@@ -165,19 +183,18 @@ class InferenceDataset():
                         self[i*batch_size + b_idx] = out[b_idx]
                         
         # average predictions and undo padding
-        self.prediction /= (n_offsets + 1)
+        self.prediction /= (self.n_offsets + 1)
         self.prediction = self.prediction[:,
                                           self.anchor[0]: self.anchor[0] + self.anchor[2],
                                           self.anchor[1]: self.anchor[1] + self.anchor[3]]
-        
         # self.postprocess()
-    
+    # 
     def postprocess(self, Class_cutoffs=[0.5, 0.5, 0.4]):
         """
         Create labelmap from probabilities
         """
-        for i in range(len(Class_cutoffs)):
-            self.prediction[i] = (self.prediction[i] > Class_cutoffs[i]) * i
+        # for i in range(len(Class_cutoffs)):
+        #     self.prediction[i] = (self.prediction[i] > Class_cutoffs[i]) * i
         self.prediction = np.argmax(self.prediction, axis=0)
         
     
@@ -190,17 +207,26 @@ class InferenceDataset():
 
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-BST_MODEL = root + r'\data\Experiment_20210328_221305_4µm5_ts256_bs20\model\bst_model256_fold4_0.7073.bin'
+EXP = root + r'\data\Experiment_20210408_141050'
 DEVICE = 'cuda'
-PATCH_SIZE = 256
-STRIDE = 16
-batch_size = 20
+STRIDE = 32
 Redo = True
-
+MAX_OFFSET = 128
+N_OFFSETS = 20
+SERIES = 2
 
 if __name__ == '__main__':
     
     javabridge.start_vm(class_path=bioformats.JARS)
+    
+    # read config
+    with open(os.path.join(EXP, "params.yaml"), "r") as yamlfile:
+        data = yaml.load(yamlfile, Loader=yaml.FullLoader)
+        
+    IMG_SIZE = data['Input']['IMG_SIZE']
+    batch_size = data['Hyperparameters']['BATCH_SIZE']
+    PIX_SIZE = data['Input']['PIX_SIZE']
+    BST_MODEL = data['Output']['Best_model']
     
     model = smp.Unet(
         encoder_name='resnet50', 
@@ -209,10 +235,10 @@ if __name__ == '__main__':
         activation=None,
     )
     
-    aug_test = A.Compose([
+    aug_forw = A.Compose([
         A.Normalize(),
-        PadIfNeeded(min_width=PATCH_SIZE, min_height=PATCH_SIZE)
-        # A.ToTensorV2()
+        PadIfNeeded(min_width=IMG_SIZE, min_height=IMG_SIZE,
+                    border_mode=cv2.BORDER_REFLECT)
     ])
     
     model.load_state_dict(torch.load(BST_MODEL))
@@ -228,7 +254,13 @@ if __name__ == '__main__':
         else:
             try:
                 ds = InferenceDataset(RAW_DIR, sample.Image_ID,
-                                      patch_size=PATCH_SIZE, stride=STRIDE)
+                                      series=SERIES,
+                                      patch_size=IMG_SIZE,
+                                      stride=STRIDE,
+                                      augmentation=aug_forw,
+                                      target_pixsize=PIX_SIZE,
+                                      max_offset=MAX_OFFSET,
+                                      n_offsets=N_OFFSETS)
                 ds.predict(model, batch_size=batch_size)
                 ds.export(outpath)
             except Exception:
@@ -236,6 +268,6 @@ if __name__ == '__main__':
                 pass
 
         
-    javabridge.kill_vm()
+    # javabridge.kill_vm()
 
     
