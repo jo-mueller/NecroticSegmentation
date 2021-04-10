@@ -49,7 +49,7 @@ class PerformanceMeter:
         
         # Replot
         x = np.arange(0, len(self.train_score), 1)
-        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)            
+        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)
         h_loss = self.TrainAx.plot(x, self.train_score,
                                    color='orange',
                                    label='Training loss')[0]
@@ -75,6 +75,27 @@ class PerformanceMeter:
         self.TrainAx.set_xlabel('Epoch [#]')
         
         plt.show()
+        plt.pause(0.05)
+        
+    def finalize(self, path):
+        epochs = np.arange(0, len(self.train_score), 1)
+        
+        df = pd.DataFrame(columns=['Epoch',
+                                   'Training Loss',
+                                   'Validation Loss 1',
+                                   'Validation Loss 2',
+                                   'Validation Loss 3'])
+        df.loc[:, ('Epoch')] = epochs
+        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)
+        df.loc[:, ('Training Loss')] = [x.numpy() for x in self.train_score]
+        df.loc[:, ('Validation Loss 1')] = valid_score[:, 0]
+        df.loc[:, ('Validation Loss 2')] = valid_score[:, 1]
+        df.loc[:, ('Validation Loss 3')] = valid_score[:, 2]
+        
+        df.to_csv(path)
+        
+        return 1
+        
         
         
 class EarlyStopping:
@@ -161,21 +182,6 @@ def metric(probability, truth, threshold=0.5, reduction='none'):
     return dice
             
 
-def evaluate(valid_loader, model, device='cuda', n_classes=3, metric=metric):
-    losses = AverageMeter()
-    model = model.to(device)
-    model.eval()
-    tk0 = tqdm(valid_loader, total=len(valid_loader))
-    with torch.no_grad():
-        for b_idx, data in enumerate(tk0):
-            for key, value in data.items():
-                data[key] = value.to(device)
-            out = torch.argmax(model(data['image']), dim=1)
-            dice = metric(out, data['mask']).cpu()
-            losses.update(dice.mean().item(), valid_loader.batch_size)
-            tk0.set_postfix(dice_score=losses.avg)
-    return losses.avg
-
 def createExp_dir(root):
     
     time_string = '{:d}{:02d}{:02d}_{:02d}{:02d}{:02d}'.format(
@@ -252,15 +258,17 @@ def scan_directory(directory, img_ID='.tif',
     df['Image_ID'] = images
     df['Mask_ID'] = masks
     
-    for i, sample in df.iterrows():
+    for i, sample in tqdm(df.iterrows()):
         
         label = tf.imread(os.path.join(directory, sample.Mask_ID))
+        image = np.sum(tf.imread(os.path.join(directory, sample.Image_ID)), axis=2)
         df.loc[i, ('has_all_labels')] = get_nlabels(label)
-        df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False               
+        df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False
+        df.loc[i, ('Is_OmittedTile')] = True if np.sum(image == 0) > 0 or np.sum(image == 3*255) > 0 else False
             
     if remove_empty_tiles:
         for i, sample in df.iterrows():
-            if sample.Is_Background:
+            if sample.Is_Background or sample.Is_OmittedTile:
                 f_mask = os.path.join(directory, sample.Mask_ID)
                 f_img = os.path.join(directory, sample.Image_ID)
                 
@@ -273,20 +281,44 @@ def scan_directory(directory, img_ID='.tif',
     
     return df.reset_index()
 
-def visualize_batch(sample):
+def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
     n_batch = sample['image'].size()[0]
     keys = list(sample.keys())
     
-    fig, axes = plt.subplots(nrows=len(keys), ncols=n_batch, figsize=(12, 4))
+    if n_batch > max_samples:
+        n_batch = max_samples
+    fig, axes = plt.subplots(nrows=len(keys), ncols=n_batch, figsize=(2*n_batch, 2*len(keys)))
     
-    for i, key in enumerate(keys):
-        for ibx in range(n_batch):
-            ax = axes[i, ibx]
-            img = sample[key][ibx].cpu().detach().numpy().transpose((1,2,0))
-            ax.imshow(img/img.max())
-    axes[0,0].set_ylabel('Raw image')
-    axes[1,0].set_ylabel('Mask image')
-    axes[2,0].set_ylabel('Prediction')
+    sample = {entry: sample[entry].cpu().detach().numpy().astype(float) for entry in sample.keys()}
+    for ibx in range(n_batch):
+        
+        for k, key in enumerate(keys):
+            
+            img = sample[key][ibx].transpose((1,2,0))
+            # Ground truth
+            if key == 'image':
+                axes[k, ibx].imshow((img - img.min())/(img.max() - img.min()))
+                axes[k, 0].set_ylabel('Raw image')
+            elif key == 'mask':
+                axes[k, ibx].imshow(img)
+                axes[k, 0].set_ylabel('Mask image')
+            elif key == 'prediction':
+                axes[k, ibx].imshow(torch.sigmoid(torch.tensor(img)))
+                axes[k, 0].set_ylabel('Prediction')
+            
+            axes[k, ibx].axis('off')  # no ticks on subplots
+    
+    
+    
+    
+    fig.tight_layout()
+    
+    plt.suptitle('Batch visualization (Epoch: {:d}, loss: {:.2f}, mean valid. score: {:.2f}'.format(
+        epoch, loss, mean_dice))
+    plt.pause(0.05)
+    plt.subplots_adjust(top=0.95)
+    
+    return fig
             
     
 # if __name__ == '__main__':
