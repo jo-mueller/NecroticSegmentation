@@ -36,7 +36,7 @@ class Dataset():
         mask_path = os.path.join(self.image_base_dir, self.df.Mask_ID.loc[i])
         img_path = os.path.join(self.image_base_dir, self.df.Image_ID.loc[i])
         
-        image = cv2.imread(img_path, 1).astype(float)
+        image = cv2.imread(img_path, 1).astype(np.float32)
         mask = np.argmax(tf.imread(mask_path), axis=0)
         
         if self.augmentation:
@@ -50,24 +50,28 @@ class Dataset():
 
 
 root = os.getcwd()
-src = root + r'\src\QuPath_Tiling\tiles_512_3.0'
+src = root + r'\src\QuPath_Tiling\tiles_256_2.5'
 
 # Config
 FOLD_ID = 4
-BATCH_SIZE =6
+BATCH_SIZE =20
 USE_SAMPLER = False
 SAMPLER  = None
 num_workers = 0
 LEARNING_RATE = 2e-5
 criterion = CrossEntropyLoss()
-EPOCHS = 100
+EPOCHS = 150
 IMG_SIZE = int(os.path.basename(src).split('_')[1])
 PIX_SIZE = float(os.path.basename(src).split('_')[2])
 EVALUATE = True
 N_CLASSES = 3
-PATIENCE = 15
+PATIENCE = 20
 device= 'cuda'
 keep_checkpoints = True
+
+# training visualization
+N_visuals = 10
+n_visuals = 0
 
 if __name__ == '__main__':
     
@@ -91,17 +95,18 @@ if __name__ == '__main__':
         A.VerticalFlip(p=0.5),     
         A.HorizontalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
-        A.Normalize()
+        # A.Normalize()
+        A.RandomBrightnessContrast(p=0.2)
     ])
     
     aug_test = A.Compose([
-        A.Normalize()
+        # A.Normalize()
         ])
 
     optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
-    # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
-    #                                                  milestones=[3, 5, 11, 15, 19],
-    #                                                  gamma=0.75)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
+                                                      milestones=[20, 40, 60, 80, 100],
+                                                      gamma=0.75)
 
     es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
     
@@ -134,7 +139,6 @@ if __name__ == '__main__':
         optimizer.zero_grad()
         tk0 = tqdm(train_dataloader, total=len(train_dataloader))
         
-        visualize_flag = True
         for b_idx, data in enumerate(tk0):
             
             # move images on GPU
@@ -155,25 +159,36 @@ if __name__ == '__main__':
             for b_idx, data in enumerate(tk1):
                 
                 # Eval
-                out = model(data['image'].to(device).float())                 
-                out = torch.argmax(out, dim=1).view(-1)
+                data['prediction'] = model(data['image'].to(device).float())                 
+                out = torch.argmax(data['prediction'], dim=1).view(-1)
                 mask = data['mask'].view(-1)
                 
-                dice += jaccard_score(mask.cpu(), out.cpu(), average=None)
+                score = jaccard_score(mask.cpu(), out.cpu(), average=None)
+                dice += score
                 tk1.set_postfix(score=np.mean(dice))
+                
+                # visualize some samples
+                if np.random.rand() > 0.99 and n_visuals < N_visuals:
+                    fig_batch = helper_functions.visualize_batch(data, epoch, loss.cpu().detach().numpy(), score.mean())
+                    fig_batch.savefig(os.path.join(DIRS['Performance'],
+                                                   f'Batch_visualization_{n_visuals}_EP{epoch}_Dice{np.round(score.mean())}.png'))
+                    plt.close(fig_batch)
+                    n_visuals += 1
             
             dice /= len(tk1)
             train_score.append(loss.cpu().detach())
             test_score.append(dice)
-            
-        Monitor.update(train_loss=loss.cpu().detach(), valid_score=dice)
         
+        # Plot progress
+        Monitor.update(train_loss=loss.cpu().detach(), valid_score=dice)
         dice = np.mean(dice)
+        
+        # Scheduling and early stopping
+        scheduler.step()
         print(f"EPOCH: {epoch}, TRAIN LOSS: {loss}, VAL DICE: {dice}")
         es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(dice, 4)}.bin")
         best_model = f"bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(es.best_score,4)}.bin"
         if es.early_stop:
-            helper_functions.visualize_batch(data)
             print('\n\n -------------- EARLY STOPPING -------------- \n\n')
             break
 
@@ -185,6 +200,7 @@ if __name__ == '__main__':
             
     # save performance data and config
     Monitor.figure.savefig(os.path.join(DIRS['Performance'], 'Training_Validation_Loss.png'))
+    Monitor.finalize(os.path.join(DIRS['Performance'], 'Training_Validation_Loss.csv'))
     
     Config = {
     'Hyperparameters': {
