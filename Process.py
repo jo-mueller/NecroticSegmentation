@@ -46,7 +46,7 @@ class InferenceDataset():
         self.n_offsets = n_offsets
         
         # Read czi image
-        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series).astype(float)
+        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series).astype(np.float32)
         self.resample(target_pixsize)
         
         # transpose if necessary
@@ -173,8 +173,9 @@ class InferenceDataset():
                 for i, data in enumerate(dataloader):
                     
                     data['image'] = data['image'].to(device).float()
-                    out = model(data['image'])
-                    out = torch.sigmoid(out).detach().cpu().numpy()
+                    data['prediction'] = model(data['image'])
+                    out = torch.sigmoid(data['prediction']).detach().cpu().numpy()
+                    # helper_functions.visualize_batch(data, 0, 0, 0)
                     
                     tk0.set_postfix(offset=offset, batch=i)
                     
@@ -205,9 +206,14 @@ class InferenceDataset():
         
         tf.imwrite(filename, self.prediction)
 
+
+
+# =============================================================================
+# CONFIG
+# =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-EXP = root + r'\data\Experiment_20210408_141050'
+EXP = root + r'\data\Experiment_20210409_175020'
 DEVICE = 'cuda'
 STRIDE = 32
 Redo = True
@@ -227,6 +233,7 @@ if __name__ == '__main__':
     batch_size = data['Hyperparameters']['BATCH_SIZE']
     PIX_SIZE = data['Input']['PIX_SIZE']
     BST_MODEL = data['Output']['Best_model']
+    N_CLASSES = data['Hyperparameters']['N_CLASSES']
     
     model = smp.Unet(
         encoder_name='resnet50', 
@@ -235,17 +242,19 @@ if __name__ == '__main__':
         activation=None,
     )
     
+    model.load_state_dict(torch.load(BST_MODEL))
+    model = model.to(DEVICE)
+    
     aug_forw = A.Compose([
-        A.Normalize(),
+        # A.Normalize(),
         PadIfNeeded(min_width=IMG_SIZE, min_height=IMG_SIZE,
                     border_mode=cv2.BORDER_REFLECT)
     ])
     
-    model.load_state_dict(torch.load(BST_MODEL))
-    model = model.to(DEVICE)
-    
+    # Scan database for raw images
     samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
     
+    # iterate over raw images
     for i, sample in samples.iterrows():
         outpath = os.path.join(sample.Directory, '1_seg', 'HE_seg_DL.tif')
         
