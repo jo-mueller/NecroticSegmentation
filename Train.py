@@ -53,7 +53,6 @@ root = os.getcwd()
 src = root + r'\src\QuPath_Tiling\tiles_256_2.5'
 
 # Config
-FOLD_ID = 4
 BATCH_SIZE =20
 USE_SAMPLER = False
 SAMPLER  = None
@@ -110,15 +109,18 @@ if __name__ == '__main__':
 
     es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
     
-    # create 5 folds train/test groups
-    kf = StratifiedKFold(n_splits=5, shuffle=True)
-    df['kfold']=-1
-    for fold, (train_index, test_index) in enumerate(kf.split(X = df.Image_ID, y=df.has_all_labels)):
-            df.loc[test_index, 'kfold'] = fold
+    # create 1/5th train/test split according to parent image
+    kf = KFold(n_splits=5, shuffle=True)
+    parents = df.Parent_image.unique()
+    train_index, test_index = next(kf.split(parents), None)
+    train_img, test_img = parents[train_index], parents[test_index]
     
-    # single fold training for now, rerun notebook to train for multi-fold
-    TRAIN_DF = df.query(f'kfold!={FOLD_ID}').reset_index(drop=True)
-    VAL_DF   = df.query(f'kfold=={FOLD_ID}').reset_index(drop=True)
+    for i, entry in enumerate(df.iterrows()):
+        df.loc[i, 'Cohort'] = 'Train' if any([x in entry[1].Parent_image for x in train_img]) else 'Test'
+    
+    # single fold training
+    TRAIN_DF = df[df.Cohort == 'Train'].reset_index(drop=True)
+    VAL_DF   = df[df.Cohort == 'Test'].reset_index(drop=True)
     
     # train/validation dataset
     train_dataset = Dataset(TRAIN_DF, src, aug_train)
@@ -186,8 +188,8 @@ if __name__ == '__main__':
         # Scheduling and early stopping
         scheduler.step()
         print(f"EPOCH: {epoch}, TRAIN LOSS: {loss}, VAL DICE: {dice}")
-        es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(dice, 4)}.bin")
-        best_model = f"bst_model{IMG_SIZE}_fold{FOLD_ID}_{np.round(es.best_score,4)}.bin"
+        es(dice, model, model_path=f"{DIRS['EXP_DIR']}/model/bst_model{IMG_SIZE}_{np.round(dice, 4)}.bin")
+        best_model = f"bst_model{IMG_SIZE}_{np.round(es.best_score,4)}.bin"
         if es.early_stop:
             print('\n\n -------------- EARLY STOPPING -------------- \n\n')
             break
