@@ -250,7 +250,7 @@ def scan_directory(directory, img_ID='.tif',
     remove_empty_tiles = kwargs.get('remove_empty_tiles', True)
     
     df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels',
-                               'Is_Background'])
+                               'Is_Background', 'Parent_image'])
     
     files = os.listdir(directory)
     masks = [x for x in files if mask_ID in x]
@@ -260,8 +260,12 @@ def scan_directory(directory, img_ID='.tif',
     
     for i, sample in tqdm(df.iterrows()):
         
+        # Determine parent image of tile
+        parent = sample.Image_ID.split(' ')[0]
         label = tf.imread(os.path.join(directory, sample.Mask_ID))
         image = np.sum(tf.imread(os.path.join(directory, sample.Image_ID)), axis=2)
+        
+        df.loc[i, ('Parent_image')] = parent
         df.loc[i, ('has_all_labels')] = get_nlabels(label)
         df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False
         df.loc[i, ('Is_OmittedTile')] = True if np.sum(image == 0) > 0 or np.sum(image == 3*255) > 0 else False
