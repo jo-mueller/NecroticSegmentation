@@ -26,6 +26,7 @@ from albumentations.augmentations.transforms import PadIfNeeded
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 import torch
+from torch import nn
 
 
 class InferenceDataset():
@@ -47,6 +48,7 @@ class InferenceDataset():
         
         # Read czi image
         self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series).astype(np.float32)
+        # self.image = np.rot90(self.image)
         self.resample(target_pixsize)
         
         # transpose if necessary
@@ -106,11 +108,34 @@ class InferenceDataset():
     def create_index_map(self):
         
         shape = (np.array(self.image.shape[1:]))//self.inner
-        self.index_map = np.arange(0, shape[0] * shape[1], 1).reshape(shape)
         
+        self.index_map = np.arange(0, shape[0] * shape[1], 1).astype(np.float32)
+        np.random.shuffle(self.index_map)
+        self.index_map = self.index_map.reshape(shape)
+        
+        # Check which of the locations refer to dumb background areas
+        for i in range(self.__len__()):
+            patch = np.sum(self[i]['image'], axis=0)
+            
+            if np.sum(patch == 0) > patch.size//2 or np.sum(patch == 3*255) > patch.size//2:
+                self.index_map[self.index_map == i] = np.nan
+        
+        # Now, fill the deleted indices so that a continuous range of indices is provided
+        idx = 0
+        while True:
+            if idx == np.sum(~np.isnan(self.index_map)):
+                break
+            if (self.index_map == idx).any():
+                idx += 1
+                continue
+            else:
+                self.index_map[self.index_map >= idx] -= 1
+                idx = 0
+        
+        return 1
         
     def __len__(self):
-        return np.max(self.index_map)
+        return int(np.nanmax(self.index_map) + 1)
     
     def __getitem__(self, key):
         
@@ -213,7 +238,7 @@ class InferenceDataset():
 # =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-EXP = root + r'\data\Experiment_20210409_175020'
+EXP = root + r'\data\Experiment_20210414_204625'
 DEVICE = 'cuda'
 STRIDE = 32
 Redo = True
@@ -230,7 +255,7 @@ if __name__ == '__main__':
         data = yaml.load(yamlfile, Loader=yaml.FullLoader)
         
     IMG_SIZE = data['Input']['IMG_SIZE']
-    batch_size = data['Hyperparameters']['BATCH_SIZE']
+    batch_size = 32
     PIX_SIZE = data['Input']['PIX_SIZE']
     BST_MODEL = data['Output']['Best_model']
     N_CLASSES = data['Hyperparameters']['N_CLASSES']
@@ -244,6 +269,12 @@ if __name__ == '__main__':
     
     model.load_state_dict(torch.load(BST_MODEL))
     model = model.to(DEVICE)
+    model.eval()
+    for module in model.modules():
+        for child in module.children():
+            if type(child) == nn.BatchNorm2d:
+                child.track_running_stats = False
+
     
     aug_forw = A.Compose([
         # A.Normalize(),
