@@ -18,7 +18,7 @@ import yaml
 from Utils import helper_functions
 from tqdm import tqdm
 import numpy as np
-# import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 from skimage.transform import resize
 
 import albumentations as A
@@ -27,7 +27,6 @@ import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 import torch
 from torch import nn
-
 
 class InferenceDataset():
     def __init__(self, image_base_dir, filename, augmentation=None,
@@ -39,15 +38,16 @@ class InferenceDataset():
         self.augmentation = augmentation
         self.resolution = 0.4418 * 2**series
         
-        self.patch_size = patch_size
-        self.stride = stride
-        self.inner = patch_size - 2*stride
+        self.patch_size = int(patch_size)
+        self.stride = int(stride)
+        self.inner = int(patch_size - 2*stride)
         self.offset = 0
         self.max_offset = max_offset
         self.n_offsets = n_offsets
         
         # Read czi image
-        self.image = bioformats.load_image(self.filename, c=None, z=0, t=0, series=series).astype(np.float32)
+        self.image = bioformats.load_image(self.filename, c=None, rescale=False, z=0, t=0, series=series)
+        # self.image[:,:][np.sum(self.image, axis=2) == 0] = 1  # uniform empty Tiles
         # self.image = np.rot90(self.image)
         self.resample(target_pixsize)
         
@@ -93,8 +93,6 @@ class InferenceDataset():
         self.prediction = np.pad(self.prediction, ((0,0), (x, xx), (y, yy)),
                             mode='constant', constant_values=0)
         
-        
-        
     def resample(self, resolution):
         """
         Resamples self.image to a given pixelsize <resolution>    
@@ -102,12 +100,12 @@ class InferenceDataset():
         
         factor = self.resolution/resolution
         outsize = [x*factor if x !=3 else 3 for x in np.array(self.image.shape, dtype=float)]
-        self.image = resize(self.image, np.floor(outsize))
+        self.image = resize(self.image, np.floor(outsize), preserve_range=True)
         self.resolution /= factor
         
     def create_index_map(self):
         
-        shape = (np.array(self.image.shape[1:]))//self.inner
+        shape = ((np.array(self.image.shape[1:]))//self.inner).astype(int)
         
         self.index_map = np.arange(0, shape[0] * shape[1], 1).astype(np.float32)
         np.random.shuffle(self.index_map)
@@ -117,7 +115,7 @@ class InferenceDataset():
         for i in range(self.__len__()):
             patch = np.sum(self[i]['image'], axis=0)
             
-            if np.sum(patch == 0) > patch.size//2 or np.sum(patch == 3*255) > patch.size//2:
+            if np.sum(patch == 0) > 100 or np.sum(patch >= 3*254) > 100:
                 self.index_map[self.index_map == i] = np.nan
         
         # Now, fill the deleted indices so that a continuous range of indices is provided
@@ -200,9 +198,10 @@ class InferenceDataset():
                     data['image'] = data['image'].to(device).float()
                     data['prediction'] = model(data['image'])
                     out = torch.sigmoid(data['prediction']).detach().cpu().numpy()
-                    # helper_functions.visualize_batch(data, 0, 0, 0)
                     
                     tk0.set_postfix(offset=offset, batch=i)
+                    
+                    # helper_functions.visualize_batch(data, 1, 1, 1)
                     
                     # iteratively write results from batches to prediction map
                     for b_idx in range(out.shape[0]):
@@ -213,8 +212,9 @@ class InferenceDataset():
         self.prediction = self.prediction[:,
                                           self.anchor[0]: self.anchor[0] + self.anchor[2],
                                           self.anchor[1]: self.anchor[1] + self.anchor[3]]
-        # self.postprocess()
-    # 
+        
+        
+        
     def postprocess(self, Class_cutoffs=[0.5, 0.5, 0.4]):
         """
         Create labelmap from probabilities
@@ -232,18 +232,69 @@ class InferenceDataset():
         tf.imwrite(filename, self.prediction)
 
 
+def Inference(raw_dir, params, model, augmentations, **kwargs):
+    """
+    Callable function for image processing.
+    Allows to pass model directly without saving/reloading.
+    """
+    
+    javabridge.start_vm(class_path=bioformats.JARS)    
+    
+    # config
+    DEVICE = kwargs.get('device', 'cuda')
+    MAX_OFFSET = kwargs.get('max_offset', 64)
+    STRIDE = kwargs.get('stride', 16)
+    Redo = kwargs.get('redo', True)
+    N_OFFSETS = kwargs.get('n_offsets', 10)
+    SERIES = kwargs.get('series', 2)
+        
+    IMG_SIZE = params['Input']['IMG_SIZE']
+    batch_size = params['Hyperparameters']['BATCH_SIZE']
+    PIX_SIZE = params['Input']['PIX_SIZE']
+    
+    # Model and augmentations
+    model.to(DEVICE)
+    model.eval()
+    aug_forw = augmentations
+    
+    # Scan database for raw images
+    samples = helper_functions.scan_database(raw_dir, img_type='czi')
+    
+    # iterate over raw images
+    for i, sample in samples.iterrows():
+        outpath = os.path.join(sample.Directory, '1_seg', 'HE_seg_DL.tif')
+        
+        if os.path.exists(outpath) and not Redo:
+            continue
+        else:
+            try:
+                ds = InferenceDataset(RAW_DIR, sample.Image_ID,
+                                      series=SERIES,
+                                      patch_size=IMG_SIZE,
+                                      stride=STRIDE,
+                                      augmentation=aug_forw,
+                                      target_pixsize=PIX_SIZE,
+                                      max_offset=MAX_OFFSET,
+                                      n_offsets=N_OFFSETS)
+
+                ds.predict(model, batch_size=batch_size)
+                ds.export(outpath)
+            except Exception:
+                print('Error in {:s}'.format(sample.Image_ID))
+                pass
+    
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-EXP = root + r'\data\Experiment_20210414_204625'
+EXP = root + r'\data\Experiment_20210421_042108'
 DEVICE = 'cuda'
-STRIDE = 32
+STRIDE = 16
 Redo = True
-MAX_OFFSET = 128
-N_OFFSETS = 20
+MAX_OFFSET = 64
+N_OFFSETS = 10
 SERIES = 2
 
 if __name__ == '__main__':
@@ -254,11 +305,12 @@ if __name__ == '__main__':
     with open(os.path.join(EXP, "params.yaml"), "r") as yamlfile:
         data = yaml.load(yamlfile, Loader=yaml.FullLoader)
         
-    IMG_SIZE = data['Input']['IMG_SIZE']
-    batch_size = 32
+    IMG_SIZE = int(data['Input']['IMG_SIZE']/2)
+    batch_size = int(data['Hyperparameters']['BATCH_SIZE'] * 4)
     PIX_SIZE = data['Input']['PIX_SIZE']
     BST_MODEL = data['Output']['Best_model']
     N_CLASSES = data['Hyperparameters']['N_CLASSES']
+    LEARNING_RATE = data['Hyperparameters']['LEARNING_RATE']
     
     model = smp.Unet(
         encoder_name='resnet50', 
@@ -266,18 +318,21 @@ if __name__ == '__main__':
         classes=3, 
         activation=None,
     )
+    # optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
     
-    model.load_state_dict(torch.load(BST_MODEL))
+    # checkpoint = 
+    model.load_state_dict(torch.load(BST_MODEL)['model_state_dict'])
+    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    
     model = model.to(DEVICE)
     model.eval()
-    for module in model.modules():
-        for child in module.children():
-            if type(child) == nn.BatchNorm2d:
-                child.track_running_stats = False
-
+    
+    for child in model.modules():
+        for cchild in child.modules():
+            if type(cchild)==nn.BatchNorm2d:
+                cchild.track_running_stats = False
     
     aug_forw = A.Compose([
-        # A.Normalize(),
         PadIfNeeded(min_width=IMG_SIZE, min_height=IMG_SIZE,
                     border_mode=cv2.BORDER_REFLECT)
     ])
@@ -285,7 +340,22 @@ if __name__ == '__main__':
     # Scan database for raw images
     samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
     
+    # # Warmup to update running stats
+    # model.train()
+    # WUP_DF = samples.sample(n=5)
+    # for i, sample in WUP_DF.iterrows():
+    #     ds = InferenceDataset(RAW_DIR, sample.Image_ID,
+    #                           series=SERIES,
+    #                           patch_size=IMG_SIZE,
+    #                           stride=STRIDE,
+    #                           augmentation=aug_forw,
+    #                           target_pixsize=PIX_SIZE,
+    #                           max_offset=MAX_OFFSET,
+    #                           n_offsets=N_OFFSETS)
+    #     ds.predict(model, batch_size=batch_size)
+    
     # iterate over raw images
+    model.eval()
     for i, sample in samples.iterrows():
         outpath = os.path.join(sample.Directory, '1_seg', 'HE_seg_DL.tif')
         
