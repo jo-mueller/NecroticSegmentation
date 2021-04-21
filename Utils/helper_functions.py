@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import torch
 import os
 import tifffile as tf
-# import cv2
+import copy
 import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
@@ -19,7 +19,7 @@ from pathlib import Path
 # import torch.nn.functional as F
 
 class PerformanceMeter:
-    def __init__(self):
+    def __init__(self, n_classes):
         
         # Make plot for performance display
         self.figure, self.TrainAx = plt.subplots(nrows=1, ncols=1)
@@ -28,6 +28,7 @@ class PerformanceMeter:
         
         self.train_score = []
         self.valid_score = []
+        self.n_classes = n_classes
         
         # Prepare legend
         self.valid_curve = []
@@ -49,13 +50,13 @@ class PerformanceMeter:
         
         # Replot
         x = np.arange(0, len(self.train_score), 1)
-        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)
+        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, self.n_classes)
         h_loss = self.TrainAx.plot(x, self.train_score,
                                    color='orange',
                                    label='Training loss')[0]
         h_valid = []
         
-        for i in range(3):
+        for i in range(self.n_classes):
             h_valid.append(self.ValidAx.plot(x, valid_score[:,i],
                                              color='blue',
                                              linestyle=self.styles[i],
@@ -66,7 +67,7 @@ class PerformanceMeter:
         labels = ['Training loss'] + [self.labels[i] for i in self.labels.keys()]
         self.TrainAx.legend(lines, labels, loc='lower center',
                             bbox_to_anchor=(0.5, 1.03), fancybox=True,
-                            shadow=True, ncol=4)
+                            shadow=True, ncol=self.n_classes+1)
         
         # Ax labels
         self.TrainAx.set_ylabel('Training loss')
@@ -86,7 +87,7 @@ class PerformanceMeter:
                                    'Validation Loss 2',
                                    'Validation Loss 3'])
         df.loc[:, ('Epoch')] = epochs
-        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, 3)
+        valid_score = np.concatenate(self.valid_score, axis=0).reshape(-1, self.n_classes)
         df.loc[:, ('Training Loss')] = [x.numpy() for x in self.train_score]
         df.loc[:, ('Validation Loss 1')] = valid_score[:, 0]
         df.loc[:, ('Validation Loss 2')] = valid_score[:, 1]
@@ -106,12 +107,13 @@ class EarlyStopping:
         self.best_score = None
         self.early_stop = False
         self.delta = delta
+        self.best_model_instance = None
         if self.mode == "min":
             self.val_score = np.Inf
         else:
             self.val_score = -np.Inf
 
-    def __call__(self, epoch_score, model, model_path):
+    def __call__(self, epoch, epoch_score, model, optimizer, model_path):
         if self.mode == "min":
             score = -1.0 * epoch_score
         else:
@@ -119,7 +121,7 @@ class EarlyStopping:
 
         if self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(epoch_score, model, model_path)
+            self.save_checkpoint(epoch, epoch_score, model, optimizer, model_path)
         elif score < self.best_score + self.delta:
             self.counter += 1
             print(
@@ -131,11 +133,11 @@ class EarlyStopping:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.save_checkpoint(epoch_score, model, model_path)
+            self.save_checkpoint(epoch, epoch_score, model, optimizer, model_path)
             self.model_path = model_path
             self.counter = 0
 
-    def save_checkpoint(self, epoch_score, model, model_path):
+    def save_checkpoint(self, epoch, epoch_score, model, optimizer, model_path):
         model_path = Path(model_path)
         parent = model_path.parent
         os.makedirs(parent, exist_ok=True)
@@ -145,7 +147,14 @@ class EarlyStopping:
                     self.val_score, epoch_score, model_path
                 )
             )
-            torch.save(model.state_dict(), model_path)
+            self.best_model_instance = copy.deepcopy(model)  # keep instance of best model
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': epoch_score,
+            }, model_path)
+            # torch.save(model.state_dict(), model_path)
         self.val_score = epoch_score
 
 # pixel-wise accuracy
@@ -248,6 +257,7 @@ def scan_directory(directory, img_ID='.tif',
     """
     
     remove_empty_tiles = kwargs.get('remove_empty_tiles', True)
+    thin_empty_tiles = kwargs.get('thin_empty_tiles', 1)
     
     df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels',
                                'Is_Background', 'Parent_image'])
@@ -270,6 +280,17 @@ def scan_directory(directory, img_ID='.tif',
         df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False
         df.loc[i, ('Is_OmittedTile')] = True if np.sum(image == 0) > 0 or np.sum(image == 3*255) > 0 else False
             
+    if thin_empty_tiles != 1:
+        for i, sample in df.iterrows():
+            if sample.Is_Background or sample.Is_OmittedTile:
+                f_mask = os.path.join(directory, sample.Mask_ID)
+                f_img = os.path.join(directory, sample.Image_ID)
+                
+                if np.random.random() > thin_empty_tiles:
+                    os.remove(f_mask)
+                    os.remove(f_img)
+                    
+    
     if remove_empty_tiles:
         for i, sample in df.iterrows():
             if sample.Is_Background or sample.Is_OmittedTile:
@@ -281,7 +302,7 @@ def scan_directory(directory, img_ID='.tif',
         
         df = df[df.Is_Background == False]
         
-    df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
+        df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
     
     return df.reset_index()
 
@@ -301,9 +322,11 @@ def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
             img = sample[key][ibx].transpose((1,2,0))
             # Ground truth
             if key == 'image':
+                img += np.finfo(float).eps
                 axes[k, ibx].imshow((img - img.min())/(img.max() - img.min()))
                 axes[k, 0].set_ylabel('Raw image')
             elif key == 'mask':
+                img += np.finfo(float).eps
                 axes[k, ibx].imshow(img)
                 axes[k, 0].set_ylabel('Mask image')
             elif key == 'prediction':
