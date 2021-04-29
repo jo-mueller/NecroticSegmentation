@@ -9,11 +9,12 @@ Source: https://github.com/amaarora/amaarora.github.io/blob/master/nbs/Training.
 @author: johan
 """
 
-import javabridge
-import bioformats
+import aicspylibczi
 import cv2
+import PIL
 import tifffile as tf
 import os
+
 import yaml
 from Utils import helper_functions
 from tqdm import tqdm
@@ -36,7 +37,7 @@ class InferenceDataset():
         self.image_base_dir = image_base_dir
         self.filename = os.path.join(image_base_dir, filename)
         self.augmentation = augmentation
-        self.resolution = 0.4418 * 2**series
+        self.resolution = 0.4418
         
         self.patch_size = int(patch_size)
         self.stride = int(stride)
@@ -46,10 +47,14 @@ class InferenceDataset():
         self.n_offsets = n_offsets
         
         # Read czi image
-        self.image = bioformats.load_image(self.filename, c=None, rescale=False, z=0, t=0, series=series)
-        # self.image[:,:][np.sum(self.image, axis=2) == 0] = 1  # uniform empty Tiles
-        # self.image = np.rot90(self.image)
-        self.resample(target_pixsize)
+        # self.image = bioformats.load_image(self.filename, c=None,
+        #                                    series=series,
+        #                                    rescale=False)
+        czi = aicspylibczi.CziFile(self.filename)
+        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)
+        self.image = self.image[::-1, :, :]
+        self.resolution = target_pixsize
+        # self.resample(target_pixsize)
         
         # transpose if necessary
         if self.image.shape[-1] == 3:
@@ -93,15 +98,17 @@ class InferenceDataset():
         self.prediction = np.pad(self.prediction, ((0,0), (x, xx), (y, yy)),
                             mode='constant', constant_values=0)
         
-    def resample(self, resolution):
-        """
-        Resamples self.image to a given pixelsize <resolution>    
-        """
+    # def resample(self, resolution):
+    #     """
+    #     Resamples self.image to a given pixelsize <resolution>    
+    #     """
         
-        factor = self.resolution/resolution
-        outsize = [x*factor if x !=3 else 3 for x in np.array(self.image.shape, dtype=float)]
-        self.image = resize(self.image, np.floor(outsize), preserve_range=True)
-        self.resolution /= factor
+    #     factor = self.resolution/resolution
+    #     outsize = np.floor([x*factor for x in np.array(self.image.shape, dtype=float)[:2]]).astype(int)
+    #     img = PIL.Image.fromarray(self.image)
+    #     out = img.resize(outsize[::-1], resample=PIL.Image.NEAREST)
+    #     self.image = np.asarray(out)
+    #     self.resolution /= factor
         
     def create_index_map(self):
         
@@ -238,18 +245,17 @@ def Inference(raw_dir, params, model, augmentations, **kwargs):
     Allows to pass model directly without saving/reloading.
     """
     
-    javabridge.start_vm(class_path=bioformats.JARS)    
     
     # config
     DEVICE = kwargs.get('device', 'cuda')
     MAX_OFFSET = kwargs.get('max_offset', 64)
-    STRIDE = kwargs.get('stride', 16)
+    STRIDE = kwargs.get('stride', 8)
     Redo = kwargs.get('redo', True)
     N_OFFSETS = kwargs.get('n_offsets', 10)
     SERIES = kwargs.get('series', 2)
         
-    IMG_SIZE = params['Input']['IMG_SIZE']
-    batch_size = params['Hyperparameters']['BATCH_SIZE']
+    IMG_SIZE = int(params['Input']['IMG_SIZE']/2)
+    batch_size = int(params['Hyperparameters']['BATCH_SIZE'] * 4)
     PIX_SIZE = params['Input']['PIX_SIZE']
     
     # Model and augmentations
@@ -289,7 +295,7 @@ def Inference(raw_dir, params, model, augmentations, **kwargs):
 # =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-EXP = root + r'\data\Experiment_20210421_042108'
+EXP = root + r'\data\Experiment_20210426_110720'
 DEVICE = 'cuda'
 STRIDE = 16
 Redo = True
@@ -298,9 +304,7 @@ N_OFFSETS = 10
 SERIES = 2
 
 if __name__ == '__main__':
-    
-    javabridge.start_vm(class_path=bioformats.JARS)
-    
+        
     # read config
     with open(os.path.join(EXP, "params.yaml"), "r") as yamlfile:
         data = yaml.load(yamlfile, Loader=yaml.FullLoader)
@@ -318,19 +322,16 @@ if __name__ == '__main__':
         classes=3, 
         activation=None,
     )
-    # optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
     
-    # checkpoint = 
     model.load_state_dict(torch.load(BST_MODEL)['model_state_dict'])
-    # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
     model = model.to(DEVICE)
     model.eval()
     
-    for child in model.modules():
-        for cchild in child.modules():
-            if type(cchild)==nn.BatchNorm2d:
-                cchild.track_running_stats = False
+    # for child in model.modules():
+    #     for cchild in child.modules():
+    #         if type(cchild)==nn.BatchNorm2d:
+    #             cchild.track_running_stats = False
     
     aug_forw = A.Compose([
         PadIfNeeded(min_width=IMG_SIZE, min_height=IMG_SIZE,
@@ -339,20 +340,6 @@ if __name__ == '__main__':
     
     # Scan database for raw images
     samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
-    
-    # # Warmup to update running stats
-    # model.train()
-    # WUP_DF = samples.sample(n=5)
-    # for i, sample in WUP_DF.iterrows():
-    #     ds = InferenceDataset(RAW_DIR, sample.Image_ID,
-    #                           series=SERIES,
-    #                           patch_size=IMG_SIZE,
-    #                           stride=STRIDE,
-    #                           augmentation=aug_forw,
-    #                           target_pixsize=PIX_SIZE,
-    #                           max_offset=MAX_OFFSET,
-    #                           n_offsets=N_OFFSETS)
-    #     ds.predict(model, batch_size=batch_size)
     
     # iterate over raw images
     model.eval()
@@ -376,8 +363,5 @@ if __name__ == '__main__':
             except Exception:
                 print('Error in {:s}'.format(sample.Image_ID))
                 pass
-
-        
-    # javabridge.kill_vm()
 
     
