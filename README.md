@@ -1,5 +1,5 @@
-# NecroticSegmentation
-Methods to segment necrotic tissue from typical HE images
+# Necrotic Segmentation
+Methods to segment necrotic tissue from typical HE images. More example image data and usage notes will follow!
 
 ## Training:
 ```--> Train.py```
