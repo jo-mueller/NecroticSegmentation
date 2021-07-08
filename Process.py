@@ -30,12 +30,11 @@ import torch
 from torch import nn
 
 class InferenceDataset():
-    def __init__(self, image_base_dir, filename, augmentation=None,
+    def __init__(self, filename, augmentation=None,
                  patch_size=512, stride=16, n_classes=3, series=3, target_pixsize = 2.0,
                  max_offset=128, n_offsets=3):
         
-        self.image_base_dir = image_base_dir
-        self.filename = os.path.join(image_base_dir, filename)
+        self.filename = filename
         self.augmentation = augmentation
         self.resolution = 0.4418
         
@@ -47,12 +46,9 @@ class InferenceDataset():
         self.n_offsets = n_offsets
         
         # Read czi image
-        # self.image = bioformats.load_image(self.filename, c=None,
-        #                                    series=series,
-        #                                    rescale=False)
         czi = aicspylibczi.CziFile(self.filename)
-        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)
-        self.image = self.image[::-1, :, :]
+        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)[0]
+        self.image = self.image[:, :, ::-1]
         self.resolution = target_pixsize
         # self.resample(target_pixsize)
         
@@ -296,7 +292,7 @@ def Inference(raw_dir, params, model, augmentations, **kwargs):
 # CONFIG
 # =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
-RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
+RAW_DIR = r'E:\Promotion\Projects\2021_MicroQuant\ImgData'
 EXP = root + r'\data\Experiment_20210426_110720'
 DEVICE = 'cuda'
 STRIDE = 16
@@ -352,7 +348,7 @@ if __name__ == '__main__':
             continue
         else:
             try:
-                ds = InferenceDataset(RAW_DIR, sample.Image_ID,
+                ds = InferenceDataset(os.path.join(sample.Directory, sample.Image_ID),
                                       series=SERIES,
                                       patch_size=IMG_SIZE,
                                       stride=STRIDE,
