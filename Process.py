@@ -236,6 +236,8 @@ class InferenceDataset():
         Export prediction map to file with deflation compression
         """
         
+        if not os.path.exists(os.path.dirname(filename)):
+            os.mkdir(os.path.dirname(filename))
         tf.imwrite(filename, self.prediction)
 
 

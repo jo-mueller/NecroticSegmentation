@@ -17,9 +17,23 @@ from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 # import torch.nn.functional as F
+import scipy.ndimage as ndimg
+import cv2
 
 class PerformanceMeter:
-    def __init__(self, n_classes):
+    def __init__(self, **kwargs):
+        
+        
+        self.class_wise = kwargs.get('class_wise', False)
+        self.n_classes = kwargs.get('n_classes', None)
+        self.labels = kwargs.get('names', None)
+        self.styles = kwargs.get('styles', None)
+        
+        if self.labels is None:
+            self.labels = {x:x for x in range(self.n_classes)}
+            
+        if self.styles is None:
+            self.styles = {0: '-', 1: '--', 2: ':', 3: '-.', 4: '.'}
         
         # Make plot for performance display
         self.figure, self.TrainAx = plt.subplots(nrows=1, ncols=1)
@@ -28,7 +42,6 @@ class PerformanceMeter:
         
         self.train_score = []
         self.valid_score = []
-        self.n_classes = n_classes
         
         # Prepare legend
         self.valid_curve = []
@@ -36,11 +49,15 @@ class PerformanceMeter:
                                             color='orange',
                                             label='Training loss')[0]
         
-        self.styles = {0: '-', 1: '--', 2: ':'}
-        self.labels = {0: 'Background', 1: 'Necrosis', 2: 'Vital'}
+        
         plt.show()
         
     def update(self, train_loss, valid_score):
+        
+        if self.class_wise == False:
+            train_loss = np.mean(train_loss.numpy())
+            valid_score = np.mean(valid_score.numpy())
+            
         self.train_score.append(train_loss)
         self.valid_score.append(valid_score)
         
@@ -72,7 +89,7 @@ class PerformanceMeter:
         # Ax labels
         self.TrainAx.set_ylabel('Training loss')
         self.ValidAx.set_ylabel('Dice validation score')
-        self.ValidAx.set_ylim(0,1)
+        # self.ValidAx.set_ylim(0,1)
         self.TrainAx.set_xlabel('Epoch [#]')
         
         plt.show()
@@ -220,7 +237,6 @@ def createExp_dir(root):
     
     return dirs
 
-
 def scan_database(directory, img_type='czi'):
     """
     Scans a radiomics database and finds HE images
@@ -249,64 +265,196 @@ def get_nlabels(label):
     return np.sum(label > 0) + 1
     
 
-def scan_directory(directory, img_ID='.tif',
-                   mask_ID = '-labelled.tif', img_type='tif', outname=None, **kwargs):
+def scan_tile_directory(directory, outname=None, **kwargs):
+    
     """
     Scans directory with mixed image/label images for label images.
-    Has to be tif. Returns a dataset with all images
+    Has to be tif. Returns a dataset with all images.
     """
     
+    img_type = kwargs.get('img_type', 'tif')
+    img_ID = kwargs.get('img_ID', '')
+    mask_ID = kwargs.get('mask_ID', '-labelled')
+    
     remove_empty_tiles = kwargs.get('remove_empty_tiles', True)
-    thin_empty_tiles = kwargs.get('thin_empty_tiles', 1)
     
-    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels',
-                               'Is_Background', 'Parent_image'])
+    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'Parent', 'Labels',
+                               'Omitted'])
     
-    files = os.listdir(directory)
-    masks = [x for x in files if mask_ID in x]
-    images = [x.replace(mask_ID, img_ID) for x in masks]
-    df['Image_ID'] = images
-    df['Mask_ID'] = masks
+    files = [x for x in os.listdir(directory) if x.endswith(img_type)]
+    df['Mask_ID'] = [x for x in files if mask_ID in x]
+    # images = [x.replace(mask_ID, img_ID) for x in masks]
+    # df['Image_ID'] = images
     
     for i, sample in tqdm(df.iterrows()):
+        # Find the raw image counterpart of this image and store in df
+        image = sample['Mask_ID'].replace(mask_ID, '')
+        if image in files:
+            df.loc[i, 'Image_ID'] = image
+        else:
+            df.loc[i, 'Image_ID'] = np.nan
         
         # Determine parent image of tile
         parent = sample.Image_ID.split(' ')[0]
-        label = tf.imread(os.path.join(directory, sample.Mask_ID))
-        image = np.sum(tf.imread(os.path.join(directory, sample.Image_ID)), axis=2)
+        df.loc[i, ('Parent')] = parent
         
-        df.loc[i, ('Parent_image')] = parent
-        df.loc[i, ('has_all_labels')] = get_nlabels(label)
-        df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False
-        df.loc[i, ('Is_OmittedTile')] = True if np.sum(image == 0) > 0 or np.sum(image == 3*255) > 0 else False
-            
-    if thin_empty_tiles != 1:
-        for i, sample in df.iterrows():
-            if sample.Is_Background or sample.Is_OmittedTile:
-                f_mask = os.path.join(directory, sample.Mask_ID)
-                f_img = os.path.join(directory, sample.Image_ID)
-                
-                if np.random.random() > thin_empty_tiles:
-                    os.remove(f_mask)
-                    os.remove(f_img)
-                    
-    
+        # Get mask and image, check dimensions
+        mask = tf.imread(os.path.join(directory, sample.Mask_ID))
+        image = tf.imread(os.path.join(directory, sample.Image_ID))
+        
+        # get present labels
+        present_labels = np.unique(np.argmax(mask, axis=0))
+        df.loc[i, ('Labels')] = present_labels
+        
+        # Check for bullshit background
+        prjctn = np.sum(image, axis=2)
+        df.loc[i, ('Omitted')] = True if (prjctn == 0).sum() > 0 or (prjctn == 3*255).sum() > 0 else False
+        
+    # remove the omitted tiles from the data directory and the dataframe
     if remove_empty_tiles:
-        for i, sample in df.iterrows():
-            if sample.Is_Background or sample.Is_OmittedTile:
+        n_rmvd = 0
+        tk = tqdm(df.iterrows(), desc='Removing empty tiles')
+        for i, sample in tk:
+            if sample.Omitted:
                 f_mask = os.path.join(directory, sample.Mask_ID)
                 f_img = os.path.join(directory, sample.Image_ID)
                 
                 os.remove(f_mask)
                 os.remove(f_img)
-        
-        df = df[df.Is_Background == False]
-        
-        df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
+                tk.set_postfix_str(f'Removed {n_rmvd} tiles')
+                n_rmvd += 1
+    df = df[df.Omitted == False]
     
-    return df.reset_index()
+    # Get class distribution info    
+    fig, ax = plt.subplots()
+    
+    n_classes = np.min(mask.shape)
+    # Occurrences = dict()
+    
+    for label in range(n_classes):
+        df[str(label)] = [True if label in x else False for x in df.Labels]
+        
+        n = df[str(label)].sum()
+        # Occurrences[label] = n
+        
+        ax.bar(label, n, label = f'$Label_{label}$')
+        ax.text(label, n, f'N={n}',
+                horizontalalignment='center',
+                verticalalignment='bottom')
+        
+    ax.legend()
+    ax.set_xticks(np.arange(0, n_classes, 1))
+    ax.set_ylabel('Label occurrences [#]')
+    ax.set_xlabel('Label')
+    ax.grid(which='major', axis='y', color='gray', alpha=0.3, zorder=0)
+    
+    return df.reset_index(), np.arange(0, n_classes, 1)
 
-def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
+def append_tiles(df, datadir, tile_dir, **kwargs):
+    
+    """
+    This function goes through all tiles and identifies the corresponding
+    data location (i.e. raw H&E, raw, transformed and segmented IF image)
+    It will create a new mask with more labels and more descriptive layer
+    """
+    
+    raw_res = kwargs.get('raw_res', 0.4418)
+    target_res = float(os.path.basename(tile_dir).split('_')[2])
+    target_size = int(os.path.basename(tile_dir).split('_')[1])
+    
+    # First get list of used samples
+    tile_IDs = [x.split(' ')[0] for x in df.Mask_ID]
+    samples = list(set(tile_IDs))
+    parent_dict = dict()
+    
+    for sample in tqdm(samples, desc='Finding parents'):
+        for root, subdirs, files in os.walk(datadir):
+            for file in files:
+                if file  == sample + '.czi':
+                    parent_dict[sample] = root
+                    break
+    
+    # find parent_dir for each tile
+    sample_dirs = [parent_dict[x] for x in tile_IDs]
+    df['Sample_dir'] = sample_dirs
+    
+    # Go through all the tiles
+    f_IF = ''
+    
+    mask_IDs_ext = []
+    for i, sample in tqdm(df.iterrows(), total=len(df)):        
+
+        new_IF = os.path.join(sample.Sample_dir, '3_meas', 'IF_seg_Simple_Segmentation_transformed.tif')
+            
+        if new_IF != f_IF:
+            try:
+                IF = tf.imread(new_IF)[1]  # for now only Hypoxia
+            except Exception:
+                mask_IDs_ext.append('not_found')
+                continue
+            f_IF = new_IF
+        
+        mask = tf.imread(os.path.join(tile_dir, sample.Mask_ID))
+        tile_coords = sample.Mask_ID.split('[')[-1].split(']')[0].split(',')
+        tile_coords = [int(x.split('=')[1]) for x in tile_coords]
+        
+        x = tile_coords[1]
+        y = tile_coords[0]
+        w = tile_coords[2]
+        h = tile_coords[3]
+        
+        # get 256-sized snip from high-res IF image
+        f = target_size/w
+        IF_snip = ndimg.zoom(IF[x:x+w, y:y+h], zoom=(f,f), order=0)
+        
+        if IF_snip.shape[0] != 256:
+            print('Wait')
+
+        # Smooth        
+        kernel = np.ones((3,3), np.uint8)
+        IF_snip = cv2.erode(IF_snip, kernel, iterations=1)
+        IF_snip = cv2.dilate(IF_snip, kernel, iterations=1)
+        
+        # create new mask (with one-hot encoding)
+        new_mask = np.zeros((mask.shape[0]+1, target_size, target_size))
+        new_mask[0:3] = mask
+        new_mask[-1] = IF_snip
+        new_mask[0][np.sum(new_mask, axis=0) == 0] = 255
+        
+        # save this mask
+        name = (sample.Mask_ID.split('.')[0] +\
+            '_0Background' +\
+            '_1Necrosis' +\
+            '_2Vital' +\
+            '_3Hypoxia' +\
+            '.tif').replace('-labelled', '')
+        tf.imwrite(os.path.join(tile_dir, name), new_mask)
+        mask_IDs_ext.append(name)
+    
+    df['Mask_ID_extended'] = mask_IDs_ext
+        
+        
+    
+
+def get_class_distribution(df, labels):
+    """
+    Returns class distribution dictionary for given dataframe
+    """
+    Occurrences = dict()
+    for label in range(len(labels)):
+        Occurrences[label] = df[str(label)].sum()
+        
+    return Occurrences
+
+def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8, **kwargs):
+    """
+    Visualize a batch ffrom the training procedure with a maximum of 8 displayed labels
+    """
+    
+    # 
+    n_classes = kwargs.get('n_classes', 3)
+    
+    # get dimensions and available image types
     n_batch = sample['image'].size()[0]
     keys = list(sample.keys())
     
@@ -314,32 +462,36 @@ def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
         n_batch = max_samples
     fig, axes = plt.subplots(nrows=len(keys), ncols=n_batch, figsize=(2*n_batch, 2*len(keys)))
     
+    # get data
     sample = {entry: sample[entry].cpu().detach().numpy().astype(float) for entry in sample.keys()}
+    
+    # iterate over images in batch
     for ibx in range(n_batch):
         
+        # iterate over keys (e.g. raw, mask, prediction)
         for k, key in enumerate(keys):
-            
             img = sample[key][ibx].transpose((1,2,0))
+            
             # Ground truth
             if key == 'image':
                 img += np.finfo(float).eps
                 axes[k, ibx].imshow((img - img.min())/(img.max() - img.min()))
                 axes[k, 0].set_ylabel('Raw image')
+                
             elif key == 'mask':
                 img += np.finfo(float).eps
                 axes[k, ibx].imshow(img)
                 axes[k, 0].set_ylabel('Mask image')
+                for im in axes[k, 0].get_images():
+                    im.set_clim(0, n_classes)
+                    
             elif key == 'prediction':
                 axes[k, ibx].imshow(torch.sigmoid(torch.tensor(img)))
                 axes[k, 0].set_ylabel('Prediction')
             
             axes[k, ibx].axis('off')  # no ticks on subplots
     
-    
-    
-    
     fig.tight_layout()
-    
     plt.suptitle('Batch visualization (Epoch: {:d}, loss: {:.2f}, mean valid. score: {:.2f}'.format(
         epoch, loss, mean_dice))
     plt.pause(0.05)
@@ -348,8 +500,11 @@ def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
     return fig
             
     
-# if __name__ == '__main__':
-#     A = PerformanceMeter()
-#     A.update(0.52, [0.9, 0.8, 0.7])
-#     A.update(0.45, [0.9, 0.8, 0.7])
-#     A.update(0.35, [0.9, 0.8, 0.7])
+if __name__ == '__main__':
+    
+    tile_dir = r'E:\Promotion\Projects\2021_Necrotic_Segmentation\src' +\
+            r'\QuPath_Tiling_Validated\tiles_256_2.5_nonVital_Vital'
+    ddir = r'E:\Promotion\Projects\2020_Radiomics\Data'
+    
+    df, _ = scan_tile_directory(tile_dir)
+    append_tiles(df, ddir, tile_dir)
