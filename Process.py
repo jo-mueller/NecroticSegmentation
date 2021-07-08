@@ -46,15 +46,11 @@ class InferenceDataset():
         self.max_offset = max_offset
         self.n_offsets = n_offsets
         
-        # Read czi image
-        # self.image = bioformats.load_image(self.filename, c=None,
-        #                                    series=series,
-        #                                    rescale=False)
+
         czi = aicspylibczi.CziFile(self.filename)
-        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)
-        self.image = self.image[::-1, :, :]
+        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)[0]
+        self.image = self.image[:, :, ::-1]
         self.resolution = target_pixsize
-        # self.resample(target_pixsize)
         
         # transpose if necessary
         if self.image.shape[-1] == 3:
