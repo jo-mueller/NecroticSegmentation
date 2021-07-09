@@ -39,10 +39,10 @@ class Dataset():
         mask_path = os.path.join(self.image_base_dir, self.df.Mask_ID.loc[i])
         img_path = os.path.join(self.image_base_dir, self.df.Image_ID.loc[i])
         
-        # image = cv2.imread(img_path, 1)
-        img = AICSImage(img_path)
-        image = img.get_image_dask_data("YXC", S=0, T=0, Z=0).compute()  # returns dask array
-        # image = bioformats.load_image(img_path, rescale=False)
+        image = cv2.imread(img_path)
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        # img = AICSImage(img_path)
+        # image = img.get_image_dask_data("YXC", S=0, T=0, Z=0).compute()  # returns dask array
         mask = np.argmax(tf.imread(mask_path), axis=0)
         
         if self.augmentation:
@@ -50,13 +50,14 @@ class Dataset():
             image, mask= sample['image'], sample['mask']
             
         return {'image': image.transpose((2,0,1)), 'mask' : mask[None,: , :]}
+    
         
     def __len__(self):
         return len(self.image_ids)
 
 
 root = os.getcwd()
-src = root + r'\src\QuPath_Tiling_Validated\tiles_256_2.5'
+src = root + r'\src\QuPath_Tiling_Validated\tiles_256_2.5_nonVital_Vital'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
 
 # Config
@@ -77,9 +78,6 @@ keep_checkpoints = True
 
 INFERENCE_MODE = False
 
-# training visualization
-N_visuals = 100
-n_visuals = 0
 
 if __name__ == '__main__':
     while True:
@@ -111,12 +109,6 @@ if __name__ == '__main__':
             # A.Normalize()
             ])
         
-        # # only necessary if inference is called directly from this script
-        # aug_inf = A.Compose([
-        #         PadIfNeeded(min_width=IMG_SIZE, min_height=IMG_SIZE,
-        #                     border_mode=cv2.BORDER_REFLECT),
-        #         A.Normalize()
-        #     ])
     
         optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, 
@@ -184,17 +176,17 @@ if __name__ == '__main__':
                     out = torch.argmax(data['prediction'], dim=1).view(-1)
                     mask = data['mask'].view(-1)
                     
-                    score = jaccard_score(mask.cpu(), out.cpu(), average=None)
+                    score = jaccard_score(mask.cpu(), out.cpu(), average=None,
+                                          labels=np.arange(0,N_CLASSES, 1))
                     dice += score
                     tk1.set_postfix(score=np.mean(dice))
                     
                     # visualize some samples
-                    if np.random.rand() > 0.98 and n_visuals < N_visuals:
+                    if np.random.rand() > 0.98:
                         fig_batch = helper_functions.visualize_batch(data, epoch, loss.cpu().detach().numpy(), score.mean())
                         fig_batch.savefig(os.path.join(DIRS['Performance'],
-                                                       f'Batch_visualization_{n_visuals}_EP{epoch}_Dice{np.round(score.mean())}.png'))
+                                                       f'Batch_visualization_{epoch}_EP{epoch}_Dice{np.round(score.mean())}.png'))
                         plt.close(fig_batch)
-                        n_visuals += 1
                 
                 dice /= len(tk1)
                 train_score.append(loss.cpu().detach())
@@ -245,11 +237,6 @@ if __name__ == '__main__':
         
         with open(os.path.join(DIRS['EXP_DIR'], "params.yaml"), 'w') as yamlfile:
             data = yaml.dump(Config, yamlfile)
-            
-        # Run inference on all images after training
-        if INFERENCE_MODE:
-            Inference(RAW_DIR, Config, es.best_model_instance, aug_inf)
-    
     
 
 
