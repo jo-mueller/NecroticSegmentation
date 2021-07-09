@@ -33,7 +33,11 @@ class PerformanceMeter:
             self.labels = {x:x for x in range(self.n_classes)}
             
         if self.styles is None:
-            self.styles = {0: '-', 1: '--', 2: ':', 3: '-.', 4: '.'}
+            self.styles = {0: (0, ()),
+                           1: (0, (1, 1)),
+                           2: '--',
+                           3: '-.',
+                           4: (0, (1, 10))}
         
         # Make plot for performance display
         self.figure, self.TrainAx = plt.subplots(nrows=1, ncols=1)
@@ -440,6 +444,7 @@ def get_class_distribution(df, labels):
     """
     Returns class distribution dictionary for given dataframe
     """
+    
     Occurrences = dict()
     for label in range(len(labels)):
         Occurrences[label] = df[str(label)].sum()
@@ -486,7 +491,8 @@ def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8, **kwargs):
                     im.set_clim(0, n_classes)
                     
             elif key == 'prediction':
-                axes[k, ibx].imshow(torch.sigmoid(torch.tensor(img)))
+                pred = torch.argmax(torch.tensor(img), dim=2)
+                axes[k, ibx].imshow(pred)
                 axes[k, 0].set_ylabel('Prediction')
             
             axes[k, ibx].axis('off')  # no ticks on subplots

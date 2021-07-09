@@ -19,9 +19,10 @@ def labelServer = new LabeledImageServer.Builder(imageData)
     .backgroundLabel(0, ColorTools.BLACK) // Specify background label (usually 0 or 255)
     .downsample(downsample)    // Choose server resolution; this should match the resolution at which tiles are exported
 //    .addLabel('EmptyTiles', 1)      // Choose output labels (the order matters!)
-    .addLabel('NonVital', 1)      // Choose output labels (the order matters!)
-    .addLabel('Vital', 2)      // Choose output labels (the order matters!)
-    .addLabel('SmoothMuscle', 3)      // Choose output labels (the order matters!)
+    .addLabel('NonVital', 1)
+    .addLabel('Vital', 2) 
+    .addLabel('SmoothMuscle', 3) 
+    .addLabel('CutArtifact', 4)  
     .multichannelOutput(true)  // If true, each label is a different channel (required for multiclass probability)
     .build()
 
