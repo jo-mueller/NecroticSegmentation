@@ -5,7 +5,6 @@ Created on Wed Mar 10 12:48:39 2021
 @author: johan
 """
 
-from aicsimageio import AICSImage
 import os
 from tqdm import tqdm
 import numpy as np
@@ -15,17 +14,15 @@ import matplotlib.pyplot as plt
 
 import yaml
 
-from sklearn.model_selection import StratifiedKFold, KFold
+from sklearn.model_selection import KFold
 import segmentation_models_pytorch as smp
 from Utils import helper_functions
-from Process import Inference
 
 from torch.utils.data import DataLoader
 from sklearn.metrics import jaccard_score
 import torch
 from torch.nn import CrossEntropyLoss
 import albumentations as A
-from albumentations.augmentations.transforms import PadIfNeeded
 
 class Dataset():
     def __init__(self, df, image_base_dir, augmentation=None):
@@ -41,8 +38,6 @@ class Dataset():
         
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        # img = AICSImage(img_path)
-        # image = img.get_image_dask_data("YXC", S=0, T=0, Z=0).compute()  # returns dask array
         mask = np.argmax(tf.imread(mask_path), axis=0)
         
         if self.augmentation:
@@ -85,7 +80,10 @@ if __name__ == '__main__':
         DIRS = helper_functions.createExp_dir(root + '/data')  
         
         # Read label tiles to dataframe
-        df = helper_functions.scan_directory(src, remove_empty_tiles=True)
+        df = helper_functions.scan_tile_directory(src, remove_empty_tiles=True)
+        
+        # Get occurrences of labels
+        helper_functions.get_label_weights(df)
         
         model = smp.Unet(
             encoder_name='resnet50', 

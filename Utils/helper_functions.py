@@ -249,62 +249,111 @@ def get_nlabels(label):
     return np.sum(label > 0) + 1
     
 
-def scan_directory(directory, img_ID='.tif',
-                   mask_ID = '-labelled.tif', img_type='tif', outname=None, **kwargs):
+def scan_tile_directory(directory, **kwargs):
+    
     """
     Scans directory with mixed image/label images for label images.
-    Has to be tif. Returns a dataset with all images
+    Has to be tif. Returns a dataset with all images.
     """
     
+    img_type = kwargs.get('img_type', 'tif')
+    img_ID = kwargs.get('img_ID', '')
+    mask_ID = kwargs.get('mask_ID', '-labelled')
+    
     remove_empty_tiles = kwargs.get('remove_empty_tiles', True)
-    thin_empty_tiles = kwargs.get('thin_empty_tiles', 1)
     
-    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'has_all_labels',
-                               'Is_Background', 'Parent_image'])
+    df = pd.DataFrame(columns=['Mask_ID', 'Image_ID', 'Parent', 'Labels',
+                               'Omitted'])
     
-    files = os.listdir(directory)
-    masks = [x for x in files if mask_ID in x]
-    images = [x.replace(mask_ID, img_ID) for x in masks]
-    df['Image_ID'] = images
-    df['Mask_ID'] = masks
+    files = [x for x in os.listdir(directory) if x.endswith(img_type)]
+    df['Mask_ID'] = [x for x in files if mask_ID in x]
+    # images = [x.replace(mask_ID, img_ID) for x in masks]
+    # df['Image_ID'] = images
     
-    for i, sample in tqdm(df.iterrows()):
+    for i, sample in tqdm(df.iterrows(), desc='Browsing tiles', total=len(df)):
+        # Find the raw image counterpart of this image and store in df
+        image = sample['Mask_ID'].replace(mask_ID, '')
+        if image in files:
+            df.loc[i, 'Image_ID'] = image
+        else:
+            df.loc[i, 'Image_ID'] = np.nan
         
         # Determine parent image of tile
         parent = sample.Image_ID.split(' ')[0]
-        label = tf.imread(os.path.join(directory, sample.Mask_ID))
-        image = np.sum(tf.imread(os.path.join(directory, sample.Image_ID)), axis=2)
+        df.loc[i, ('Parent')] = parent
         
-        df.loc[i, ('Parent_image')] = parent
-        df.loc[i, ('has_all_labels')] = get_nlabels(label)
-        df.loc[i, ('Is_Background')] = True if np.sum(label) == 0 else False
-        df.loc[i, ('Is_OmittedTile')] = True if np.sum(image == 0) > 0 or np.sum(image == 3*255) > 0 else False
-            
-    if thin_empty_tiles != 1:
-        for i, sample in df.iterrows():
-            if sample.Is_Background or sample.Is_OmittedTile:
-                f_mask = os.path.join(directory, sample.Mask_ID)
-                f_img = os.path.join(directory, sample.Image_ID)
-                
-                if np.random.random() > thin_empty_tiles:
+        # Get mask and image, check dimensions
+        mask = tf.imread(os.path.join(directory, sample.Mask_ID))
+        image = tf.imread(os.path.join(directory, sample.Image_ID))
+        
+        # get present labels
+        present_labels = np.unique(np.argmax(mask, axis=0))
+        df.loc[i, ('Labels')] = present_labels
+        
+        # Check for bullshit background
+        prjctn = np.sum(image, axis=2)
+        df.loc[i, ('Omitted')] = True if (prjctn == 0).sum() > 0 or (prjctn == 3*255).sum() > 0 else False
+        
+    # remove the omitted tiles from the data directory and the dataframe
+    if remove_empty_tiles:
+        
+        if (df.Omitted == True).sum() > 0:        
+            n_rmvd = 0
+            tk = tqdm(df.iterrows(), desc='Removing empty tiles')
+            for i, sample in tk:
+                if sample.Omitted:
+                    f_mask = os.path.join(directory, sample.Mask_ID)
+                    f_img = os.path.join(directory, sample.Image_ID)
+                    
                     os.remove(f_mask)
                     os.remove(f_img)
-                    
+                    tk.set_postfix_str(f'Removed {n_rmvd} tiles')
+                    n_rmvd += 1
+    df = df[df.Omitted == False]
     
-    if remove_empty_tiles:
-        for i, sample in df.iterrows():
-            if sample.Is_Background or sample.Is_OmittedTile:
-                f_mask = os.path.join(directory, sample.Mask_ID)
-                f_img = os.path.join(directory, sample.Image_ID)
-                
-                os.remove(f_mask)
-                os.remove(f_img)
+    # Get class distribution info    
+    fig, ax = plt.subplots()
+    
+    n_classes = np.min(mask.shape)
+    # Occurrences = dict()
+    
+    for label in range(n_classes):
+        df[str(label)] = [True if label in x else False for x in df.Labels]
         
-        df = df[df.Is_Background == False]
+        n = df[str(label)].sum()
+        # Occurrences[label] = n
         
-        df.loc[:, ('has_all_labels')] = df.loc[:, ('has_all_labels')] == 3
+        ax.bar(label, n, label = f'$Label_{label}$')
+        ax.text(label, n, f'N={n}',
+                horizontalalignment='center',
+                verticalalignment='bottom')
+        
+    ax.legend()
+    ax.set_xticks(np.arange(0, n_classes, 1))
+    ax.set_ylabel('Label occurrences [#]')
+    ax.set_xlabel('Label')
+    ax.grid(which='major', axis='y', color='gray', alpha=0.3, zorder=0)
     
     return df.reset_index()
+
+def get_label_weights(df, n_classes, **kwargs):
+    
+    label_names = kwargs.get('label_names', dict({0: 'Background',
+                                                  1: 'Non-Vital',
+                                                  2: 'Vital'}))
+    classes = np.unique(np.hstack(df[0].Labels))
+    occurrences = []
+    
+    for idx in classes:
+        n = df[f'{idx}'].sum()
+        occurrences.append(n)
+        
+    fig, ax = plt.subplots(nrows=1, ncols=1)
+    
+    ax.bar()
+    
+    
+    
 
 def visualize_batch(sample, epoch, loss, mean_dice, **kwargs):
     """
