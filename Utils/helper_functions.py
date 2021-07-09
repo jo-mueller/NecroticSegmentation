@@ -306,7 +306,15 @@ def scan_directory(directory, img_ID='.tif',
     
     return df.reset_index()
 
-def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
+def visualize_batch(sample, epoch, loss, mean_dice, **kwargs):
+    """
+    Function to create a visualization of images from a ingle batch
+    """
+    
+    n_classes = kwargs.get('n_classes', 3)
+    max_samples = kwargs.get('max_samples', 8)
+    
+    # get dimensions and available image types
     n_batch = sample['image'].size()[0]
     keys = list(sample.keys())
     
@@ -314,38 +322,41 @@ def visualize_batch(sample, epoch, loss, mean_dice, max_samples=8):
         n_batch = max_samples
     fig, axes = plt.subplots(nrows=len(keys), ncols=n_batch, figsize=(2*n_batch, 2*len(keys)))
     
+    # get data
     sample = {entry: sample[entry].cpu().detach().numpy().astype(float) for entry in sample.keys()}
+    
+    # iterate over images in batch
     for ibx in range(n_batch):
         
+        # iterate over keys (e.g. raw, mask, prediction)
         for k, key in enumerate(keys):
-            
             img = sample[key][ibx].transpose((1,2,0))
+            
             # Ground truth
             if key == 'image':
                 img += np.finfo(float).eps
                 axes[k, ibx].imshow((img - img.min())/(img.max() - img.min()))
                 axes[k, 0].set_ylabel('Raw image')
+                
             elif key == 'mask':
                 img += np.finfo(float).eps
                 axes[k, ibx].imshow(img)
                 axes[k, 0].set_ylabel('Mask image')
+                for im in axes[k, 0].get_images():
+                    im.set_clim(0, n_classes)
+                    
             elif key == 'prediction':
-                axes[k, ibx].imshow(torch.sigmoid(torch.tensor(img)))
+                pred = torch.argmax(torch.tensor(img), dim=2)
+                axes[k, ibx].imshow(pred)
                 axes[k, 0].set_ylabel('Prediction')
             
             axes[k, ibx].axis('off')  # no ticks on subplots
     
-    
-    
-    
     fig.tight_layout()
-    
     plt.suptitle('Batch visualization (Epoch: {:d}, loss: {:.2f}, mean valid. score: {:.2f}'.format(
         epoch, loss, mean_dice))
     plt.pause(0.05)
     plt.subplots_adjust(top=0.95)
-    
-    return fig
             
     
 # if __name__ == '__main__':
