@@ -1,6 +1,9 @@
 # Necrotic Segmentation
 Methods to segment necrotic tissue from typical HE images. More example image data and usage notes will follow!
 
+## Installation
+Clone the repository into a local directory. Then, ```cd``` into the newly created directory and create an anaconda environment with ```conda env create -f environment.yml```
+
 ## Training:
 ```--> Train.py```
 Training can be done based on annotated tiles which can generated, for instance, with QuPath as described [here](https://qupath.readthedocs.io/en/latest/docs/advanced/exporting_images.html). A modified script to export tiles with names as expected by Necrotic Segmentation is given by ```Utils/tilify_annotations.groovy```
