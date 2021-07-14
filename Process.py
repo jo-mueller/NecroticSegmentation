@@ -38,6 +38,7 @@ class InferenceDataset():
         self.filename = os.path.join(image_base_dir, filename)
         self.augmentation = augmentation
         self.resolution = 0.4418
+        self.n_classes = n_classes
         
         self.patch_size = int(patch_size)
         self.stride = int(stride)
@@ -47,12 +48,9 @@ class InferenceDataset():
         self.n_offsets = n_offsets
         
         # Read czi image
-        # self.image = bioformats.load_image(self.filename, c=None,
-        #                                    series=series,
-        #                                    rescale=False)
         czi = aicspylibczi.CziFile(self.filename)
-        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)
-        self.image = self.image[::-1, :, :]
+        self.image = czi.read_mosaic(C = 0, scale_factor=self.resolution/target_pixsize)[0]
+        self.image = self.image[:, :, ::-1]
         self.resolution = target_pixsize
         # self.resample(target_pixsize)
         
@@ -60,7 +58,8 @@ class InferenceDataset():
         if self.image.shape[-1] == 3:
             self.image = self.image.transpose((2, 0, 1))
         
-        self.prediction = np.zeros_like(self.image, dtype='float32')
+        self.prediction = np.zeros((self.n_classes, self.image.shape[1], self.image.shape[2]),
+                                   dtype='float32')
         
         # assign indeces on 2d grid and pad to prevent index errors
         self.create_index_map()
@@ -98,17 +97,6 @@ class InferenceDataset():
         self.prediction = np.pad(self.prediction, ((0,0), (x, xx), (y, yy)),
                             mode='constant', constant_values=0)
         
-    # def resample(self, resolution):
-    #     """
-    #     Resamples self.image to a given pixelsize <resolution>    
-    #     """
-        
-    #     factor = self.resolution/resolution
-    #     outsize = np.floor([x*factor for x in np.array(self.image.shape, dtype=float)[:2]]).astype(int)
-    #     img = PIL.Image.fromarray(self.image)
-    #     out = img.resize(outsize[::-1], resample=PIL.Image.NEAREST)
-    #     self.image = np.asarray(out)
-    #     self.resolution /= factor
         
     def create_index_map(self):
         
@@ -239,55 +227,6 @@ class InferenceDataset():
         tf.imwrite(filename, self.prediction)
 
 
-def Inference(raw_dir, params, model, augmentations, **kwargs):
-    """
-    Callable function for image processing.
-    Allows to pass model directly without saving/reloading.
-    """
-    
-    
-    # config
-    DEVICE = kwargs.get('device', 'cuda')
-    MAX_OFFSET = kwargs.get('max_offset', 64)
-    STRIDE = kwargs.get('stride', 8)
-    Redo = kwargs.get('redo', True)
-    N_OFFSETS = kwargs.get('n_offsets', 10)
-    SERIES = kwargs.get('series', 2)
-        
-    IMG_SIZE = int(params['Input']['IMG_SIZE']/2)
-    batch_size = int(params['Hyperparameters']['BATCH_SIZE'] * 4)
-    PIX_SIZE = params['Input']['PIX_SIZE']
-    
-    # Model and augmentations
-    model.to(DEVICE)
-    model.eval()
-    aug_forw = augmentations
-    
-    # Scan database for raw images
-    samples = helper_functions.scan_database(raw_dir, img_type='czi')
-    
-    # iterate over raw images
-    for i, sample in samples.iterrows():
-        outpath = os.path.join(sample.Directory, '1_seg', 'HE_seg_DL.tif')
-        
-        if os.path.exists(outpath) and not Redo:
-            continue
-        else:
-            try:
-                ds = InferenceDataset(RAW_DIR, sample.Image_ID,
-                                      series=SERIES,
-                                      patch_size=IMG_SIZE,
-                                      stride=STRIDE,
-                                      augmentation=aug_forw,
-                                      target_pixsize=PIX_SIZE,
-                                      max_offset=MAX_OFFSET,
-                                      n_offsets=N_OFFSETS)
-
-                ds.predict(model, batch_size=batch_size)
-                ds.export(outpath)
-            except Exception:
-                print('Error in {:s}'.format(sample.Image_ID))
-                pass
     
 
 # =============================================================================
@@ -295,7 +234,7 @@ def Inference(raw_dir, params, model, augmentations, **kwargs):
 # =============================================================================
 root = r'E:\Promotion\Projects\2021_Necrotic_Segmentation'
 RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
-EXP = root + r'\data\Experiment_20210426_110720'
+EXP = root + r'\data\Experiment_20210713_001952'
 DEVICE = 'cuda'
 STRIDE = 16
 Redo = True
@@ -319,7 +258,7 @@ if __name__ == '__main__':
     model = smp.Unet(
         encoder_name='resnet50', 
         encoder_weights='imagenet', 
-        classes=3, 
+        classes=N_CLASSES, 
         activation=None,
     )
     
@@ -340,6 +279,7 @@ if __name__ == '__main__':
     
     # Scan database for raw images
     samples = helper_functions.scan_database(RAW_DIR, img_type='czi')
+    samples = samples[samples.Image_ID == r'E:\Promotion\Projects\2020_Radiomics\Data\N182a_SAS_0_0\HE_E16b_0032.czi']
     
     # iterate over raw images
     model.eval()
@@ -351,6 +291,7 @@ if __name__ == '__main__':
         else:
             try:
                 ds = InferenceDataset(RAW_DIR, sample.Image_ID,
+                                      n_classes=N_CLASSES,
                                       series=SERIES,
                                       patch_size=IMG_SIZE,
                                       stride=STRIDE,
