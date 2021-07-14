@@ -19,7 +19,7 @@ from pathlib import Path
 # import torch.nn.functional as F
 
 class PerformanceMeter:
-    def __init__(self, n_classes):
+    def __init__(self, n_classes, **kwargs):
         
         # Make plot for performance display
         self.figure, self.TrainAx = plt.subplots(nrows=1, ncols=1)
@@ -36,8 +36,10 @@ class PerformanceMeter:
                                             color='orange',
                                             label='Training loss')[0]
         
-        self.styles = {0: '-', 1: '--', 2: ':'}
-        self.labels = {0: 'Background', 1: 'Necrosis', 2: 'Vital'}
+        self.styles = kwargs.get('styles', {0: 'solid', 1: 'dotted', 2: 'dashed',
+                                            3: 'dashdot', 4: (0, (3, 1, 1, 1))})
+        self.labels = kwargs.get('labels', {0: 'Background', 1: 'Necrosis', 2: 'Vital',
+                                            3: 'SMA', 4: 'Cut Artifact'})
         plt.show()
         
     def update(self, train_loss, valid_score):
@@ -256,6 +258,26 @@ def scan_tile_directory(directory, **kwargs):
     Has to be tif. Returns a dataset with all images.
     """
     
+    pardir = os.path.dirname(directory)
+    dset_name = os.path.basename(directory)
+    
+    df_file = os.path.join(pardir, dset_name + '.csv')
+    if os.path.exists(df_file):
+        df = pd.read_csv(df_file, dtype={'Mask_ID': str,
+                                         'Image_ID': str,
+                                         'Parent': str,
+                                         'Omitted': bool,
+                                         '0': bool,
+                                         '1': bool,
+                                         '2': bool,
+                                         '3': bool,
+                                         '4': bool},
+                           converters={"Labels": lambda string: [int(x) for x in string.strip('[]').split(' ')]})
+        
+        classes = np.unique(np.hstack(df.Labels))
+        print('Found existing dataframe for source directory.')
+        return df, len(classes)
+    
     img_type = kwargs.get('img_type', 'tif')
     img_ID = kwargs.get('img_ID', '')
     mask_ID = kwargs.get('mask_ID', '-labelled')
@@ -286,7 +308,7 @@ def scan_tile_directory(directory, **kwargs):
         mask = tf.imread(os.path.join(directory, sample.Mask_ID))
         image = tf.imread(os.path.join(directory, sample.Image_ID))
         
-        # get present labels
+        # get present labels and write to df
         present_labels = np.unique(np.argmax(mask, axis=0))
         df.loc[i, ('Labels')] = present_labels
         
@@ -311,49 +333,81 @@ def scan_tile_directory(directory, **kwargs):
                     n_rmvd += 1
     df = df[df.Omitted == False]
     
-    # Get class distribution info    
-    fig, ax = plt.subplots()
+    # Add separate column for each label
+    classes = np.unique(np.hstack(df.Labels))
+    df = df.reindex(columns = ['Parent_image'] + df.columns.tolist() + [f'{x}' for x in classes])
     
-    n_classes = np.min(mask.shape)
-    # Occurrences = dict()
+    for i, sample in tqdm(df.iterrows(), desc='Assigning labels'):
+        for j in classes:
+            if j in sample.Labels:
+                df.loc[i, (f'{j}')] = True
+            else:
+                df.loc[i, (f'{j}')] = False
     
-    for label in range(n_classes):
-        df[str(label)] = [True if label in x else False for x in df.Labels]
-        
-        n = df[str(label)].sum()
-        # Occurrences[label] = n
-        
-        ax.bar(label, n, label = f'$Label_{label}$')
-        ax.text(label, n, f'N={n}',
-                horizontalalignment='center',
-                verticalalignment='bottom')
-        
-    ax.legend()
-    ax.set_xticks(np.arange(0, n_classes, 1))
-    ax.set_ylabel('Label occurrences [#]')
-    ax.set_xlabel('Label')
-    ax.grid(which='major', axis='y', color='gray', alpha=0.3, zorder=0)
+    for i, sample in tqdm(df.iterrows(), desc='Assigning parent images'):
+        parent = sample.Image_ID.split(' [')[0]
+        df.loc[i, ('Parent_image')] = parent
+                
+                
+    df = df.reset_index()
+    df.to_csv(df_file)    
     
-    return df.reset_index()
+    return df, len(classes)
 
-def get_label_weights(df, n_classes, **kwargs):
+def get_label_weights(df, **kwargs):
+    
+    """
+    Fuunction that counts how often each present label in the dataframe occurs
+    """
     
     label_names = kwargs.get('label_names', dict({0: 'Background',
                                                   1: 'Non-Vital',
-                                                  2: 'Vital'}))
-    classes = np.unique(np.hstack(df[0].Labels))
+                                                  2: 'Vital',
+                                                  3: 'SMA',
+                                                  4: 'CutArtifact'}))
+    n_classes = kwargs.get('n_classes', 3)
+    classes = np.arange(0,n_classes, 1)
     occurrences = []
     
     for idx in classes:
         n = df[f'{idx}'].sum()
         occurrences.append(n)
         
-    fig, ax = plt.subplots(nrows=1, ncols=1)
+    fig, axes = plt.subplots(nrows=1, ncols=2)        
+    ax = axes[0]
+    ax.bar(classes, occurrences, color=['orange', 'blue', 'green', 'magenta', 'cyan'])
+    ax.set_ylim(0, ax.get_ylim()[1]*1.25)  # add 25% more y-range
     
-    ax.bar()
+    for i in range(n_classes):
+        ax.text(classes[i], occurrences[i],
+                '{:s}\nn={:d}'.format(label_names[i], occurrences[i]),
+                rotation=90,
+                verticalalignment='bottom',
+                horizontalalignment='center')
+        
+    ax.set_ylabel('Label occurrence')
+    ax.set_xticks([])
     
+    # Plot weights        
+    ax1 = axes[1]
+    weights = [1.0/x for x in occurrences]
+    ax1.bar(classes, weights, color=['orange', 'blue', 'green', 'magenta', 'cyan'])
+    ax1.set_ylim(0, ax1.get_ylim()[1]*1.25)  # add 25% more y-range
     
+    for i in range(n_classes):
+        ax1.text(classes[i], weights[i],
+                '{:s}\nweight={:.2e}'.format(label_names[i], weights[i]),
+                rotation=90,
+                verticalalignment='bottom',
+                horizontalalignment='center')
+
+    ax1.set_ylabel('Label weight')
+    ax1.set_xticks([])
     
+    fig.tight_layout()
+    
+    return fig, occurrences
+
 
 def visualize_batch(sample, epoch, loss, mean_dice, **kwargs):
     """
@@ -395,8 +449,15 @@ def visualize_batch(sample, epoch, loss, mean_dice, **kwargs):
                     im.set_clim(0, n_classes)
                     
             elif key == 'prediction':
-                pred = torch.argmax(torch.tensor(img), dim=2)
+                if n_classes > 3:
+                    pred = torch.argmax(torch.tensor(img), dim=2)
+                else:
+                    pred = img
+                    
                 axes[k, ibx].imshow(pred)
+                for im in axes[k, ibx].get_images():
+                    im.set_clim(0, n_classes)
+                    
                 axes[k, 0].set_ylabel('Prediction')
             
             axes[k, ibx].axis('off')  # no ticks on subplots
@@ -406,6 +467,8 @@ def visualize_batch(sample, epoch, loss, mean_dice, **kwargs):
         epoch, loss, mean_dice))
     plt.pause(0.05)
     plt.subplots_adjust(top=0.95)
+    
+    return fig
             
     
 # if __name__ == '__main__':
