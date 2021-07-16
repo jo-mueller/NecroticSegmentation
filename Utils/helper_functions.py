@@ -38,7 +38,7 @@ class PerformanceMeter:
         
         self.styles = kwargs.get('styles', {0: 'solid', 1: 'dotted', 2: 'dashed',
                                             3: 'dashdot', 4: (0, (3, 1, 1, 1))})
-        self.labels = kwargs.get('labels', {0: 'Background', 1: 'Necrosis', 2: 'Vital',
+        self.labels = kwargs.get('label_names', {0: 'Background', 1: 'Necrosis', 2: 'Vital',
                                             3: 'SMA', 4: 'Cut Artifact'})
         plt.show()
         
@@ -223,7 +223,7 @@ def createExp_dir(root):
     return dirs
 
 
-def scan_database(directory, img_type='czi'):
+def scan_database(directory, img_type='czi', identifier='HE'):
     """
     Scans a radiomics database and finds HE images
     """
@@ -234,7 +234,7 @@ def scan_database(directory, img_type='czi'):
         for filename in filenames:
             if 'NK' in root:
                 continue
-            if 'HE' in filename and filename.endswith(img_type):
+            if identifier in filename and filename.endswith(img_type):
                 images.append(os.path.join(root, filename))
                 dirs.append(root)
     
@@ -271,7 +271,9 @@ def scan_tile_directory(directory, **kwargs):
                                          '1': bool,
                                          '2': bool,
                                          '3': bool,
-                                         '4': bool},
+                                         '4': bool,
+                                         '5': bool,
+                                         'Weight': float},
                            converters={"Labels": lambda string: [int(x) for x in string.strip('[]').split(' ')]})
         
         classes = np.unique(np.hstack(df.Labels))
@@ -309,7 +311,10 @@ def scan_tile_directory(directory, **kwargs):
         image = tf.imread(os.path.join(directory, sample.Image_ID))
         
         # get present labels and write to df
-        present_labels = np.unique(np.argmax(mask, axis=0))
+        if len(mask.shape) == 3:
+            present_labels = np.unique(np.argmax(mask, axis=0))
+        else:
+            present_labels = np.unique(mask)
         df.loc[i, ('Labels')] = present_labels
         
         # Check for bullshit background
@@ -347,10 +352,6 @@ def scan_tile_directory(directory, **kwargs):
     for i, sample in tqdm(df.iterrows(), desc='Assigning parent images'):
         parent = sample.Image_ID.split(' [')[0]
         df.loc[i, ('Parent_image')] = parent
-                
-                
-    df = df.reset_index()
-    df.to_csv(df_file)    
     
     return df, len(classes)
 
@@ -366,7 +367,7 @@ def get_label_weights(df, **kwargs):
                                                   3: 'SMA',
                                                   4: 'CutArtifact'}))
     n_classes = kwargs.get('n_classes', 3)
-    classes = np.arange(0,n_classes, 1)
+    classes = [x for x in label_names.keys()]
     occurrences = []
     
     for idx in classes:
@@ -380,7 +381,7 @@ def get_label_weights(df, **kwargs):
     
     for i in range(n_classes):
         ax.text(classes[i], occurrences[i],
-                '{:s}\nn={:d}'.format(label_names[i], occurrences[i]),
+                '{:s}\nn={:d}'.format(label_names[classes[i]], occurrences[i]),
                 rotation=90,
                 verticalalignment='bottom',
                 horizontalalignment='center')
@@ -392,11 +393,11 @@ def get_label_weights(df, **kwargs):
     ax1 = axes[1]
     weights = [1.0/x for x in occurrences]
     ax1.bar(classes, weights, color=['orange', 'blue', 'green', 'magenta', 'cyan'])
-    ax1.set_ylim(0, ax1.get_ylim()[1]*1.25)  # add 25% more y-range
+    ax1.set_ylim(0, ax1.get_ylim()[1]*1.35)  # add 25% more y-range
     
     for i in range(n_classes):
         ax1.text(classes[i], weights[i],
-                '{:s}\nweight={:.2e}'.format(label_names[i], weights[i]),
+                '{:s}\nweight={:.2e}'.format(label_names[classes[i]], weights[i]),
                 rotation=90,
                 verticalalignment='bottom',
                 horizontalalignment='center')
@@ -405,6 +406,13 @@ def get_label_weights(df, **kwargs):
     ax1.set_xticks([])
     
     fig.tight_layout()
+    
+    if not 'Weight' in df.columns:
+        # Implement sampling: assign weight to each sample
+        for i, sample in tqdm(df.iterrows(), desc='Assigning weights'):
+            for idx in range(n_classes):
+                if sample[f'{classes[idx]}'] == True:
+                    df.loc[i, 'Weight'] = weights[idx]
     
     return fig, occurrences
 
