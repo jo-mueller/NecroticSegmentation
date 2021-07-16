@@ -38,7 +38,9 @@ class Dataset():
         
         image = cv2.imread(img_path)
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        mask = np.argmax(tf.imread(mask_path), axis=0)
+        mask = tf.imread(mask_path)
+        if len(mask.shape) == 3:
+            mask = np.argmax(mask, axis=0)
         
         if self.augmentation:
             sample = self.augmentation(image=image, mask=mask)
@@ -52,8 +54,7 @@ class Dataset():
 
 
 root = os.getcwd()
-src = root + r'\src\QuPath_Tiling_Validated\tiles_256_2.5_nonVital_Vital_SMA'
-RAW_DIR = r'E:\Promotion\Projects\2020_Radiomics\Data'
+src = r'E:\Promotion\Projects\2021_Necrotic_Segmentation\src\IF\tiles_256_0.44'
 
 # Config
 BATCH_SIZE =31
@@ -73,6 +74,16 @@ sampling = True
 
 INFERENCE_MODE = False
 
+# label_names = kwargs.get('label_names', dict({0: 'Background',
+#                                               1: 'Non-Vital',
+#                                               2: 'Vital',
+#                                               3: 'SMA',
+#                                               4: 'CutArtifact'}))
+label_names = dict({0: 'Background',
+                    1: 'Background2',
+                    2: 'Vessels',
+                    3: 'Hypoxia',
+                    4: 'Perfusion'})
 
 if __name__ == '__main__':
     
@@ -83,9 +94,15 @@ if __name__ == '__main__':
     df, n_classes = helper_functions.scan_tile_directory(src, remove_empty_tiles=True)
     
     # Get occurrences of labels
-    fig, weights = helper_functions.get_label_weights(df, n_classes=n_classes)
+    fig, weights = helper_functions.get_label_weights(df, n_classes=n_classes, label_names=label_names)
+    
+    # save characteristics
     fig.savefig(os.path.join(DIRS['EXP_DIR'], 'Class_distributions.png'))
     plt.close(fig)
+    
+    df_file = os.path.join(os.path.dirname(src), os.path.basename(src) + '.csv')
+    if not os.path.exists(df_file):
+        df.to_csv(df_file)
     
     # load segmentation model
     model = smp.Unet(
@@ -109,15 +126,7 @@ if __name__ == '__main__':
     # Specify optimizer & early stopping
     optimizer = torch.optim.Adam(model.parameters(), lr= LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=np.arange(0,1000, 20), gamma=0.75)
-    es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')
-    
-    # Implement sampling: assign weight to each sample
-    weights = [1.0/x for x in weights]
-    for i, sample in tqdm(df.iterrows(), desc='Assigning weights'):
-        for idx in range(n_classes):
-            if sample[f'{idx}'] == True:
-                df.loc[i, 'Weight'] = weights[idx]
-    
+    es = helper_functions.EarlyStopping(patience=PATIENCE, mode='max')    
     
     # create 1/5th train/test split according to parent image
     kf = KFold(n_splits=5, shuffle=True)
@@ -133,8 +142,8 @@ if __name__ == '__main__':
     VAL_DF   = df[df.Cohort == 'Test'].reset_index(drop=True)
     
     # visualize class distributions
-    fig_train, _ = helper_functions.get_label_weights(TRAIN_DF)
-    fig_val, _ = helper_functions.get_label_weights(VAL_DF)
+    fig_train, _ = helper_functions.get_label_weights(TRAIN_DF, label_names=label_names)
+    fig_val, _ = helper_functions.get_label_weights(VAL_DF, label_names=label_names)
     
     fig_train.savefig(os.path.join(DIRS['EXP_DIR'], 'Class_distributions_train.png'))
     plt.close(fig_train)
@@ -176,12 +185,12 @@ if __name__ == '__main__':
                                   num_workers=num_workers,
                                   sampler=weighted_sampler_test)
     
-    Monitor = helper_functions.PerformanceMeter(n_classes=n_classes)
+    Monitor = helper_functions.PerformanceMeter(n_classes=n_classes, label_names=label_names)
     
     # score lists
     train_score = []
     test_score = []
-    seen_labels =  np.zeros((n_classes))
+    # seen_labels =  np.zeros((n_classes))
     
     # train
     for epoch in range(EPOCHS):
@@ -196,10 +205,10 @@ if __name__ == '__main__':
             for key, value in data.items():
                 data[key] = value.to(device).float()
                 
-            # Count encountered labels
-            for idx in range(data['mask'].shape[0]):
-                _labels = torch.unique(data['mask'][idx]).cpu().numpy().astype(int)
-                seen_labels[_labels] += 1
+            # # Count encountered labels
+            # for idx in range(data['mask'].shape[0]):
+            #     _labels = torch.unique(data['mask'][idx]).cpu().numpy().astype(int)
+            #     seen_labels[_labels] += 1
                 
             # train
             data['prediction']  = model(data['image'])
@@ -277,7 +286,8 @@ if __name__ == '__main__':
         'PIX_SIZE': PIX_SIZE},
     'Output':{
         'Best_model': os.path.join(DIRS['Models'], best_model)
-        }
+        },
+    'Labels': label_names
     }
     
     with open(os.path.join(DIRS['EXP_DIR'], "params.yaml"), 'w') as yamlfile:
